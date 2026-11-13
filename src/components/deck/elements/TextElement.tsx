@@ -22,7 +22,7 @@ function GradientSpans({ text, accent, accent2 }: { text: string; accent: string
 export function TextElement({ content, style }: { content: TextContent; style?: Record<string, unknown> }) {
   const { theme } = useRenderCtx();
   const { colors, typography } = theme;
-  const s = (style || {}) as { fontSize?: number; color?: string; textAlign?: 'left' | 'center' | 'right' };
+  const s = (style || {}) as import('../../../deck-spec').ElementStyle;
 
   const role = content.role || 'body';
   const base: Record<string, React.CSSProperties['fontSize']> = {};
@@ -80,6 +80,12 @@ export function TextElement({ content, style }: { content: TextContent; style?: 
         ...roleStyle[role],
         ...(s.color ? { color: s.color } : {}),
         ...(s.textAlign ? { textAlign: s.textAlign } : {}),
+        ...(s.fontFamily ? { fontFamily: fontFamily(s.fontFamily) } : {}),
+        ...(s.fontWeight ? { fontWeight: s.fontWeight } : {}),
+        ...(s.lineHeight ? { lineHeight: s.lineHeight } : {}),
+        ...(s.letterSpacing !== undefined ? { letterSpacing: s.letterSpacing } : {}),
+        ...(s.backgroundColor ? { background: s.backgroundColor, borderRadius: s.radius || 0 } : {}),
+        overflowWrap: 'break-word',
       }}
     >
       <GradientSpans text={content.text ?? ''} accent={colors.accent} accent2={colors.accent2} />

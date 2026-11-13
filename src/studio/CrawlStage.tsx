@@ -8,7 +8,7 @@ const POLL_MS = 2200;
 
 /** Polls until the (already running) research pipeline completes or fails. */
 async function waitForResearch(projectId: string): Promise<Project> {
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + 360_000;
   for (;;) {
     await new Promise((r) => setTimeout(r, POLL_MS));
     const p = await getProject(projectId);
@@ -41,7 +41,7 @@ const SCRIPT: string[] = [
 
 
 export default function CrawlStage({ project, onAnalyzed }: { project: Project; onAnalyzed: (p: Project) => void }) {
-  const [running, setRunning] = useState(['queued', 'draft', 'crawling', 'processing', 'analyzing', 'identifying', 'researching', 'extracting', 'validating', 'planning'].includes(project.status));
+  const [running, setRunning] = useState(['queued', 'draft', 'crawling', 'processing', 'analyzing', 'identifying', 'researching', 'extracting', 'validating', 'planning', 'generating'].includes(project.status));
   const [lines, setLines] = useState<Line[]>([]);
   const initialErr = project.analysis?.crawlError?.message || (project.status === 'failed' || project.status === 'error' ? 'The previous research attempt failed — retry below.' : '');
   const [err, setErr] = useState(initialErr);
@@ -55,7 +55,11 @@ export default function CrawlStage({ project, onAnalyzed }: { project: Project; 
   useEffect(() => () => timers.current.forEach(clearTimeout), []);
 
   useEffect(() => {
-    if (['queued', 'draft', 'crawling', 'analyzing', 'identifying', 'researching', 'extracting', 'validating'].includes(project.status) && !started.current) run();
+    if (started.current) return;
+    if (['crawling', 'processing', 'analyzing', 'identifying', 'researching', 'extracting', 'validating', 'planning', 'generating'].includes(project.status)) {
+      started.current = true;
+      void pushLines(() => waitForResearch(project.id));
+    } else if (['queued', 'draft'].includes(project.status)) void run();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -91,7 +95,7 @@ export default function CrawlStage({ project, onAnalyzed }: { project: Project; 
         if (session.researchMode) setResearchMode(session.researchMode as 'crawl_only' | 'crawl_and_search');
       } catch { /* non-fatal */ }
 
-      const finishAt = Math.max(Date.now() - startedAtRef.current, 520 * SCRIPT.length + 350);
+      const finishAt = Math.max(0, 520 * SCRIPT.length + 350 - (Date.now() - startedAtRef.current));
       timers.current.push(
         setTimeout(() => {
           const research = updated.analysis?.research;

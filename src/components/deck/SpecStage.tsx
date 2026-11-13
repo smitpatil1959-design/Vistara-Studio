@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import type { PresentationSpec, SlideElement, SlideSpec } from '../../deck-spec';
 import { Element } from './elements';
@@ -9,7 +9,7 @@ import { useReducedMotion } from '../../hooks/useReducedMotion';
 /* ------------------------------------------------------------ backgrounds */
 
 function SlideBackgroundLayer({ spec, slide }: { spec: PresentationSpec; slide: SlideSpec }) {
-  const { colors, effects } = spec.theme;
+  const { colors, effects } = { ...spec.theme, ...slide.themeOverride };
   const bg = slide.background || { type: 'theme', value: '' };
   const glowA = 0.2 * (effects.glowIntensity ?? 0.5);
   const glowB = 0.14 * (effects.glowIntensity ?? 0.5);
@@ -22,7 +22,7 @@ function SlideBackgroundLayer({ spec, slide }: { spec: PresentationSpec; slide: 
 
   return (
     <>
-      <div className="absolute inset-0" style={{ background: bg.type === 'gradient' ? `linear-gradient(135deg, ${colors.bg}, ${colors.surfaceAlt})` : base }} />
+      <div className="absolute inset-0" style={{ background: bg.type === 'gradient' ? (/^linear-gradient\([\d\s.deg%,#a-fA-F()]+\)$/.test(bg.value) ? bg.value : `linear-gradient(135deg, ${colors.bg}, ${colors.surfaceAlt})`) : base }} />
       {bg.type === 'image' && bg.value && (
         <div className="absolute inset-0" style={{ backgroundImage: `url(${bg.value})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
       )}
@@ -69,7 +69,7 @@ interface CoreProps {
 }
 
 function ComposedSlideCore({ spec, slide, index, manualWaiting, onContinue }: CoreProps) {
-  const { theme } = spec;
+  const theme = { ...spec.theme, ...slide.themeOverride };
   const reducedMotion = useReducedMotion();
   const kickers = bySlot(slide.elements, 'kicker');
   const titles = bySlot(slide.elements, 'title');
@@ -137,6 +137,14 @@ function ComposedSlideCore({ spec, slide, index, manualWaiting, onContinue }: Co
       ))}
     </div>
   ) : null;
+
+  if (slide.composition) return (
+    <div className="relative w-full h-full overflow-hidden" style={{ fontFamily: `'${theme.typography.bodyFont}', sans-serif` }}>
+      <div className="absolute inset-0" style={{ background: slide.background.type === 'solid' || (slide.background.type === 'gradient' && /^linear-gradient\([\d\s.deg%,#a-fA-F()]+\)$/.test(slide.background.value)) ? slide.background.value : theme.colors.bg }} />
+      {slide.background.type === 'image' && <div className="absolute inset-0 bg-cover bg-center" style={{ backgroundImage: `url(${slide.background.value})` }} />}
+      {slide.elements.map((element, i) => <Element key={element.id} element={element} staggerBase={i * 0.35} />)}
+    </div>
+  );
 
   return (
     <div className="relative w-full h-full overflow-hidden" style={{ borderRadius: theme.radius.md, fontFamily: `'${theme.typography.bodyFont}', sans-serif` }}>
@@ -226,7 +234,7 @@ export function SpecStage({
 
   const ctx: RenderCtx = useMemo(
     () => ({
-      theme: spec.theme,
+      theme: { ...spec.theme, ...slide?.themeOverride },
       motion: spec.motion,
       animate,
       interactive,
@@ -238,7 +246,7 @@ export function SpecStage({
         transition: elementTransition(anim, spec.motion, delayMs, reducedMotion) as Record<string, unknown>,
       }),
     }),
-    [spec, index, animate, interactive, reducedMotion]
+    [spec, slide, index, animate, interactive, reducedMotion]
   );
 
   if (!slide) {
@@ -286,7 +294,7 @@ function ComposedSlideWithTrigger({ spec, slide, index }: { spec: PresentationSp
 
 /* ------------------------------------------------------------ scaled canvas */
 
-export function SpecCanvas({
+export const SpecCanvas = memo(function SpecCanvas({
   spec,
   index,
   animate = false,
@@ -304,7 +312,7 @@ export function SpecCanvas({
       <ScaledSpecInner spec={spec} index={index} animate={animate} interactive={interactive} />
     </div>
   );
-}
+}, (previous, next) => previous.index === next.index && previous.spec.slides[previous.index] === next.spec.slides[next.index] && previous.spec.theme === next.spec.theme && previous.spec.motion === next.spec.motion && previous.spec.slides.length === next.spec.slides.length && previous.animate === next.animate && previous.interactive === next.interactive && previous.className === next.className);
 
 function ScaledSpecInner({ spec, index, animate, interactive }: { spec: PresentationSpec; index: number; animate: boolean; interactive: boolean }) {
   const ref = useRef<HTMLDivElement>(null);

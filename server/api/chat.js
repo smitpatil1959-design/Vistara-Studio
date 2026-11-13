@@ -1,5 +1,5 @@
 import supabase from './db-client.js';
-import { ensureDeckAccess, requireProjectOwner } from '../visibility.js';
+import { requireProjectOwner } from '../visibility.js';
 import { enforceRateLimit } from '../ratelimit.js';
 
 const cors = (res) => {
@@ -16,8 +16,7 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const { projectId } = req.query;
       if (!projectId) return res.status(400).json({ error: 'projectId required' });
-      const access = await ensureDeckAccess(supabase, req, projectId);
-      if (!access.allowed) return res.status(404).json({ error: 'Not found.' });
+      if (!(await requireProjectOwner(supabase, req, projectId))) return res.status(403).json({ error: 'Only the project owner can read workspace chat.' });
       const { data, error } = await supabase
         .from('chat_messages')
         .select('*')

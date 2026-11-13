@@ -11,8 +11,8 @@ const FORMATS = [
     id: 'web',
     icon: Globe,
     name: 'Interactive web',
-    pitch: 'A live, animated, private-link presentation — motion, interactions, shareable instantly.',
-    free: 'Link is unlisted by default; re-renders after every edit.',
+    pitch: 'An animated presentation that follows the deck’s sharing settings.',
+    free: 'The link shows the latest saved version.',
   },
   {
     id: 'pdf',
@@ -25,8 +25,8 @@ const FORMATS = [
     id: 'pptx',
     icon: FileCode2,
     name: 'PowerPoint (.pptx)',
-    pitch: 'A real Office deck — text, stat cards, grids, imagery, and charts re-composed natively.',
-    free: 'Fonts map to Office-safe faces; the report lists each substitution.',
+    pitch: 'An editable Office deck with text, shapes, tables, charts and notes.',
+    free: 'The readiness report lists font substitutions and export limitations.',
   },
 ] as const;
 
@@ -105,6 +105,7 @@ export default function ExportDialog({ projectId, projectName, origin, onClose, 
 
   // event-handler path (format chips + retry button) may show the loader again
   const pickFormat = (fmt: FormatId) => {
+    if (fmt === format) return;
     setFormat(fmt);
     setLoadingReport(true);
   };
@@ -284,7 +285,7 @@ export default function ExportDialog({ projectId, projectName, origin, onClose, 
 
         <div className="px-6 py-4 border-t border-line bg-panel2 flex items-center gap-3">
           <span className="text-[10.5px] font-mono text-fog">
-            {fmt.id === 'web' ? 'private by default · instant updates' : fmt.id === 'pdf' ? 'video prints as its poster · motion settles to final pose' : 'fonts swap to Office-safe faces · video embeds as linked stills'}
+            {fmt.id === 'web' ? 'uses your sharing settings' : fmt.id === 'pdf' ? 'video prints as its poster · motion settles to final pose' : 'font substitutions · videos export as linked stills'}
           </span>
           <div className="ml-auto flex items-center gap-2">
             <button onClick={onClose} className="btn-quiet rounded-xl px-4 py-2.5 text-[12.5px]">

@@ -17,6 +17,13 @@
 
 // Common navigation, UI chrome, and utility labels
 const UI_CHROME_PATTERNS = [
+  /^(?:these (?:cookies|technologies)|where we have your email address|allow (?:all )?cookies|we (?:and our partners )?use cookies|cookies help us|prev next|spotlight:\s*[a-z]{3}\s+\d+)\b/i,
+  /\b(please enter a valid email address|sign up for (?:our )?newsletter|designed by \w+ privacy policy)\b/i,
+  /\b(?:sign in|log in)\s+(?:help|offers|search)\b/i,
+  /\b(you can (?:change|manage|update) your cookie preferences|cookie consent preferences|vendors may rely on your consent)\b/i,
+  /^(?:for )?(?:help and support|customer support):?$/i,
+  /\b(this page displays a fallback|interactive scripts did not run|enable javascript|javascript is disabled|browser is not supported|browser is unsupported)\b/i,
+  /\b(all rights reserved|copyright\s*©?|legal statements\s+privacy notice)\b/i,
   /^(home|menu|navigation|nav|header|footer|sidebar|breadcrumb)$/i,
   /^(sign in|log in|login|sign up|signup|register|logout|log out|my account|profile)$/i,
   /^(privacy policy|terms of service|terms & conditions|cookie policy|cookie settings|manage cookies|cookie preferences)$/i,
@@ -95,6 +102,9 @@ export function cleanExtractedText(text) {
     .replace(/&nbsp;/gi, ' ')
     .replace(/[\r\n\t]+/g, ' ')
     .replace(/\s{2,}/g, ' ')
+    .replace(/^Not the OS you are looking for\?\s*/i, '')
+    .replace(/\bYour browser does not support (?:the )?(?:video|audio)(?: tag)?[.!]?\s*/gi, '')
+    .replace(/\s+(?:Learn more about[^.]*|View the full list of[^.]*|Read more)\s*\.\s*$/i, '')
     .trim();
 }
 
@@ -140,7 +150,7 @@ export function isGarbageOrFragment(rawText) {
   }
 
   // Check if string is predominantly punctuation or numbers
-  const letters = text.replace(/[^a-zA-Z]/g, '');
+  const letters = text.match(/\p{L}/gu) || [];
   if (letters.length < 8) return true;
 
   const letterRatio = letters.length / text.length;
@@ -148,7 +158,8 @@ export function isGarbageOrFragment(rawText) {
 
   // Check word count: meaningful claims usually have at least 4 distinct words
   const words = text.split(/\s+/).filter((w) => w.length > 1);
-  if (words.length < 4) return true;
+  const noSpacesRequired = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Khmer}]/u.test(text);
+  if (!noSpacesRequired && words.length < 4) return true;
 
   // Repetitive word stutter e.g. "Cars cars cars cars"
   const uniqueWords = new Set(words.map((w) => w.toLowerCase()));
@@ -160,7 +171,7 @@ export function isGarbageOrFragment(rawText) {
   // Sentence structure check: a meaningful claim usually contains at least one verb-like word
   // (heuristic: ends with punctuation, or contains a common verb form)
   const hasVerbStructure =
-    /[.!?]$/.test(text) ||                                    // ends with sentence punctuation
+    /[.!?。！？؟।]$/.test(text) ||
     /\b(is|are|was|were|has|have|had|does|do|did|can|will|would|should|may|might|must|offers?|provides?|enables?|delivers?|helps?|builds?|creates?|connects?|serves?|supports?|includes?|allows?|gives?|makes?|uses?|runs?)\b/i.test(text);
 
   // Short texts (< 60 chars) without verb structure are likely labels

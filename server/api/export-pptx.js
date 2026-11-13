@@ -40,17 +40,17 @@ export default async function handler(req, res) {
     }
 
     // pre-flight gate — export never silently drops content or corrupt output
-    const report = await buildReadinessReport(spec, { format: 'pptx', probeAssets: true });
+    const report = await buildReadinessReport(spec, { format: 'pptx', probeAssets: true, projectId });
     if (!report.ready) {
       return res.status(422).json({ error: 'Export has blocking issues', report });
     }
 
-    const pptx = await buildPptx(spec);
+    const pptx = await buildPptx(spec, { projectId });
     const buf = await pptx.write({ outputType: 'nodebuffer' });
     const { error: eventError } = await supabase.from('project_events').insert({ project_id: projectId, kind: 'updated' });
     if (eventError) console.warn('[api/export-pptx] event log failed:', eventError.message);
 
-    const filename = `${(project.name || 'presentation').replace(/[^a-z0-9]+/gi, '-').toLowerCase()}-vistara.pptx`;
+    const filename = `${(spec.name || project.name || 'presentation').replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').toLowerCase().slice(0, 100) || 'presentation'}-vistara.pptx`;
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.presentationml.presentation');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', String(buf.length));

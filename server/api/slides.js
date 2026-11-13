@@ -124,6 +124,7 @@ export default async function handler(req, res) {
       }
 
       void logEvent(row.project_id, 'slide_created');
+      await rebuildSpec(row.project_id, 'manual-edit');
       return res.status(201).json(data);
     }
 
@@ -143,7 +144,7 @@ export default async function handler(req, res) {
 
         if (body.reorder[0]?.id) {
           const pid = await projectIdOf(body.reorder[0].id);
-          if (pid) void rebuildSpec(pid, 'manual-edit').catch((e) => console.warn('spec sync failed:', e.message));
+          if (pid) await rebuildSpec(pid, 'manual-edit');
         }
         return res.status(200).json({ ok: true });
       }
@@ -161,6 +162,7 @@ export default async function handler(req, res) {
         return res.status(500).json({ error: error.message || 'Failed to update slide' });
       }
       if (pid) void logEvent(pid, 'slide_updated');
+      if (pid) await rebuildSpec(pid, 'manual-edit');
       return res.status(200).json(data);
     }
 
@@ -177,6 +179,7 @@ export default async function handler(req, res) {
         return res.status(500).json({ error: error.message || 'Failed to delete slide' });
       }
       if (pid) void logEvent(pid, 'slide_deleted');
+      if (pid) await rebuildSpec(pid, 'manual-edit');
       return res.status(200).json({ ok: true });
     }
 

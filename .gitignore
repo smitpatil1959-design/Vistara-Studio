@@ -37,3 +37,8 @@ dist-ssr
 api_backup/
 
 supabase/.temp/
+
+.test-build/backend/
+.test-build/dependency-audit.json
+
+!.env.example

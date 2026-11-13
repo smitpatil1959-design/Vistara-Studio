@@ -4,8 +4,9 @@ import { CrawlBlockedError } from '../security.js';
 import { ASSET_BUCKET, optimizeImage, assetPath } from '../assets.js';
 import { enforceRateLimit } from '../ratelimit.js';
 import { requireProjectOwner } from '../visibility.js';
-import config from '../config.js';
 import { orchestrateResearch } from '../researchOrchestrator.js';
+import { claimPipeline, setPipelineStatus } from '../pipeline.js';
+import { assetUrl } from '../assetAccess.js';
 
 export const maxDuration = 60;
 
@@ -77,52 +78,48 @@ async function storeCapture(projectId, buffer, name, sourcePage) {
 
   const mainPath = assetPath(projectId, name, 'main');
 
-  await supabase.storage
+  const { error: uploadError } = await supabase.storage
     .from(ASSET_BUCKET)
     .upload(mainPath, opt.main, {
       contentType: opt.mime || 'image/jpeg',
       upsert: true,
     });
+  if (uploadError) throw uploadError;
 
   let thumbPath = null;
 
   if (opt.thumb) {
     thumbPath = assetPath(projectId, name, 'thumb');
 
-    await supabase.storage
+    const { error: thumbError } = await supabase.storage
       .from(ASSET_BUCKET)
       .upload(thumbPath, opt.thumb, {
         contentType: 'image/jpeg',
         upsert: true,
       });
+    if (thumbError) thumbPath = null;
   }
 
-  const { data: pub } = supabase.storage
-    .from(ASSET_BUCKET)
-    .getPublicUrl(mainPath);
-
-  const { data: pubT } = thumbPath
-    ? supabase.storage
-      .from(ASSET_BUCKET)
-      .getPublicUrl(thumbPath)
-    : { data: { publicUrl: null } };
-
-  await supabase.from('assets').insert({
+  const { error: assetError } = await supabase.from('assets').insert({
     project_id: projectId,
     kind: 'scan',
     name,
     path: mainPath,
     thumb_path: thumbPath,
-    url: pub.publicUrl,
-    thumb_url: pubT.publicUrl,
+    url: assetUrl(projectId, mainPath),
+    thumb_url: thumbPath ? assetUrl(projectId, thumbPath) : null,
     width: opt.width,
     height: opt.height,
     bytes: opt.main.length,
     mime: opt.mime || 'image/jpeg',
     source_page: sourcePage,
   });
+  if (assetError) {
+    await supabase.storage.from(ASSET_BUCKET).remove([mainPath, thumbPath].filter(Boolean));
+    throw assetError;
+  }
 
-  return pub.publicUrl;
+  return assetUrl(projectId, mainPath);
 }
 
 export default async function handler(req, res) {
@@ -150,6 +147,8 @@ export default async function handler(req, res) {
     });
   }
 
+  let acquired = false;
+  let crawlResult;
   try {
     // ── Ownership check ────────────────────────────────────────────────
     if (!(await requireProjectOwner(supabase, req, projectId))) {
@@ -198,31 +197,15 @@ export default async function handler(req, res) {
     const researchPurpose = intake?.purpose || 'general';
 
     // ── Idempotency ───────────────────────────────────────────────────
-    const activeStatuses = [
-      'crawling',
-      'processing',
-      'identifying',
-      'researching',
-      'extracting',
-      'validating',
-      'planning',
-    ];
-
-    if (activeStatuses.includes(project.status)) {
+    acquired = await claimPipeline(supabase, project, 'crawling');
+    if (!acquired) {
       return res.status(409).json({
         error: 'Research already in progress.',
       });
     }
 
     // ── Crawl phase ───────────────────────────────────────────────────
-    await supabase
-      .from('projects')
-      .update({ status: 'crawling' })
-      .eq('id', projectId);
-
     void logEvent(projectId, 'analysis_started');
-
-    let crawlResult;
 
     try {
       crawlResult = await analyzeWebsite(project.url);
@@ -294,10 +277,7 @@ export default async function handler(req, res) {
     }
 
     // ── Research pipeline ─────────────────────────────────────────────
-    await supabase
-      .from('projects')
-      .update({ status: 'processing' })
-      .eq('id', projectId);
+    await setPipelineStatus(supabase, projectId, 'processing');
 
     const research = await orchestrateResearch(
       projectId,
@@ -307,10 +287,16 @@ export default async function handler(req, res) {
     );
 
     // Attach research summary to analysis
+    if (research.sessionStatus === 'failed') {
+      const error = new Error('Research evidence could not be saved. Check the database migrations and retry the analysis.');
+      error.code = 'RESEARCH_FAILED';
+      throw error;
+    }
     crawlResult.analysis = {
       ...crawlResult.analysis,
 
       research: {
+        sessionId: research.sessionId,
         mode: research.researchMode,
         status: research.sessionStatus,
         subject: research.subjectInfo,
@@ -324,12 +310,6 @@ export default async function handler(req, res) {
 
     const theme = {
       skin: ds.skin || 'light',
-      accent:
-        project.theme?.accent ||
-        ds.accent ||
-        crawlResult.suggestedAccent ||
-        '#65A30D',
-
       accent2: ds.accent2 || '#0E7490',
 
       headingFont: ds.headingFont || 'Inter Tight',
@@ -355,6 +335,7 @@ export default async function handler(req, res) {
       crawlResult.understanding?.identity?.name?.value ||
       crawlResult.understanding?.productName ||
       project.name;
+    if (crawlResult.analysis.brandKit) crawlResult.analysis.brandKit.brandName = productName;
 
     const {
       data: updated,
@@ -369,6 +350,7 @@ export default async function handler(req, res) {
         dna: crawlResult.dna || null,
         theme,
         name: productName,
+        updated_at: new Date().toISOString(),
       })
       .eq('id', projectId)
       .select()
@@ -385,7 +367,7 @@ export default async function handler(req, res) {
       research.researchMode === 'crawl_and_search'
         ? `researched ${research.summary.totalSources} sources and extracted ${research.summary.totalEvidence} evidence points`
         : `crawled ${crawlResult.analysis.pages?.length ?? 0
-        } pages (internet research disabled — add OPENAI_API_KEY to enable)`;
+        } official pages and extracted ${research.summary.totalEvidence} evidence points (no additional public-search evidence was available)`;
 
     try {
       const { error: chatInsertError } = await supabase
@@ -413,6 +395,13 @@ export default async function handler(req, res) {
 
   } catch (err) {
     console.error('analyze api error:', err);
+    if (acquired) {
+      try {
+        await setPipelineStatus(supabase, projectId, 'failed', {
+          ...(crawlResult ? { analysis: crawlResult.analysis, audit: crawlResult.audit, understanding: crawlResult.understanding } : {}),
+        });
+      } catch (statusError) { console.error('[analyze] Could not record failure:', statusError.message); }
+    }
 
     const msg = err?.message || String(err || '');
 
@@ -456,6 +445,7 @@ export default async function handler(req, res) {
       });
     }
 
+    if (err?.code === 'RESEARCH_FAILED') return res.status(503).json({ error: err.message, code: err.code });
     return res.status(500).json({
       error: err.message || 'Server error',
     });

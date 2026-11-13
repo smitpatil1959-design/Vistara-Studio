@@ -9,6 +9,7 @@ function safeImageSrc(src: string): string {
   if (!s) return '';
   if (/^https?:\/\//i.test(s)) return s;
   if (/^data:image\//i.test(s)) return s;
+  if (/^\/api\/asset-file\?/.test(s)) return s;
   return '';
 }
 
@@ -16,9 +17,10 @@ export function ImageElement({ content, style, size }: { content: ImageContent; 
   const { theme } = useRenderCtx();
   const [failed, setFailed] = useState(false);
   const { colors, radius, shadows } = theme;
-  const s = (style || {}) as { radius?: number; shadow?: string };
+  const s = (style || {}) as import('../../../deck-spec').ElementStyle;
+  const shadow = s.shadow && s.shadow !== 'none' ? shadows[s.shadow] : undefined;
   const radiusPx = s.radius ?? radius.lg;
-  const minH = typeof size?.h === 'number' ? Math.max(120, size.h) : 120;
+  const minH = typeof size?.h === 'number' ? Math.max(16, size.h) : 120;
 
   const src = safeImageSrc(content.src);
   if (failed || !src) {
@@ -40,7 +42,8 @@ export function ImageElement({ content, style, size }: { content: ImageContent; 
       alt={content.alt || ''}
       onError={() => setFailed(true)}
       className="w-full h-full"
-      style={{ objectFit: content.fit || 'cover', display: 'block', borderRadius: content.frame === 'browser' ? 0 : radiusPx }}
+      loading="lazy"
+      style={{ objectFit: content.fit || 'cover', objectPosition: `${content.focalPoint?.x ?? 50}% ${content.focalPoint?.y ?? 50}%`, display: 'block', borderRadius: content.frame === 'browser' ? 0 : radiusPx }}
     />
   );
 
@@ -48,7 +51,7 @@ export function ImageElement({ content, style, size }: { content: ImageContent; 
     return (
       <div
         className="w-full h-full overflow-hidden"
-        style={{ borderRadius: radiusPx, border: `1px solid ${colors.line}`, background: colors.surface, boxShadow: s.shadow === 'lg' ? shadows.lg : shadows.md }}
+        style={{ borderRadius: radiusPx, border: `1px solid ${colors.line}`, background: colors.surface, boxShadow: shadow || (s.shadow === 'none' ? undefined : shadows.md) }}
       >
         <div className="flex items-center gap-1.5" style={{ padding: '9px 13px', borderBottom: `1px solid ${colors.line}` }}>
           {['#FF5F57', '#FEBC2E', '#28C840'].map((c) => (
@@ -64,7 +67,7 @@ export function ImageElement({ content, style, size }: { content: ImageContent; 
   }
 
   return (
-    <div className="w-full h-full overflow-hidden" style={{ borderRadius: radiusPx, boxShadow: s.shadow === 'lg' ? shadows.lg : s.shadow === 'none' ? 'none' : undefined }}>
+    <div className="w-full h-full overflow-hidden" style={{ borderRadius: radiusPx, boxShadow: shadow }}>
       {img}
     </div>
   );

@@ -4,6 +4,9 @@ import { executeOps } from '../engine.js';
 import { rebuildSpec } from '../specSync.js';
 import { enforceRateLimit } from '../ratelimit.js';
 import { requireProjectOwner } from '../visibility.js';
+import { getVerifiedClaims } from '../claimEngine.js';
+import { createEditorProposal } from '../editorProposal.js';
+import { validatePresentation } from '../spec/index.js';
 
 export const maxDuration = 30;
 
@@ -38,6 +41,17 @@ export default async function handler(req, res) {
 
   try {
     if (!(await requireProjectOwner(supabase, req, projectId))) return res.status(403).json({ error: 'Only the project owner can edit this project.' });
+    if (req.body.mode === 'proposal') {
+      const { spec, slideId, selection } = req.body;
+      if (!validatePresentation(spec).valid) return res.status(400).json({ error: 'A valid presentation draft is required.' });
+      const slide = spec.slides.find(item => item.id === slideId);
+      if (!slide) return res.status(400).json({ error: 'Select a slide in your presentation.' });
+      const { data: stored, error } = await supabase.from('project_specs').select('spec').eq('project_id', projectId).maybeSingle();
+      if (error) throw error;
+      if (stored?.spec?.id !== spec.id) return res.status(409).json({ error: 'This presentation has changed. Reload it before requesting suggestions.' });
+      const claims = await getVerifiedClaims(projectId);
+      return res.status(200).json(await createEditorProposal(directive, slide, claims, Array.isArray(selection) ? selection.slice(0, 30) : []));
+    }
     const [{ data: project }, { data: slides }, { data: intake }] = await Promise.all([
       supabase.from('projects').select('*').eq('id', projectId).single(),
       supabase.from('slides').select('*').eq('project_id', projectId).order('sort_order', { ascending: true }),
@@ -63,7 +77,8 @@ export default async function handler(req, res) {
     let specVersion = null;
     if (turn.hasEdits) {
       void logEvent(projectId, 'ai_edit');
-      const rebuilt = await rebuildSpec(projectId, 'ai-edit').catch(() => null);
+      const themeChanged = turn.ops.some(op => op.op === 'updateProject' && op.fields?.theme);
+      const rebuilt = await rebuildSpec(projectId, 'ai-edit', { themeChanged });
       specVersion = rebuilt ? rebuilt.version : null;
     }
 

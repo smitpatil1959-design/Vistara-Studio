@@ -27,7 +27,7 @@ console.log(
 
 const config = {
   // ── Supabase (required) ──────────────────────────────────────────────────
-  supabaseUrl: process.env.SUPABASE_URL,
+  supabaseUrl: process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL,
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
 
   // ── OpenAI (SERVER-SIDE ONLY) ─────────────────────────────────────────────
@@ -110,7 +110,7 @@ const config = {
    */
   getMissingKeys() {
     return requiredKeys.filter(
-      (key) => !process.env[key]
+      (key) => key === 'SUPABASE_URL' ? !this.supabaseUrl : !process.env[key]
     );
   },
 
@@ -125,7 +125,8 @@ const config = {
    * @returns {boolean}
    */
   isOpenAiConfigured() {
-    return !!this.openaiApiKey;
+    const provider = (process.env.AI_PROVIDER || 'auto').toLowerCase();
+    return ['openai', 'auto'].includes(provider) && !(provider === 'auto' && process.env.NVIDIA_API_KEY) && !!this.openaiApiKey;
   },
 
   /**
@@ -202,11 +203,8 @@ const config = {
 
 const validation = config.validate();
 
-if (!validation.valid) {
-  throw new Error(
-    `Missing required environment variables: ${validation.missing.join(', ')}`
-  );
-}
+// Validate on first database use. API modules must remain importable during
+// deployment builds and for OPTIONS/liveness requests without runtime secrets.
 
 if (validation.warnings.length > 0) {
   console.warn(

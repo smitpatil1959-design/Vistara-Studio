@@ -10,7 +10,7 @@
  *   - AI polish explicitly rejects generic category titles
  */
 
-import config from '../config.js';
+import { llmAvailable } from '../understanding/llm.js';
 import { areTextsSubstantiallyDuplicate } from './presentationCritic.js';
 
 /**
@@ -53,7 +53,7 @@ export async function writePresentationContent(slidePlan, subjectProfile, projec
         project_id: project?.id,
         claim_ids: [],
         evidence_ids: [],
-        source_urls: [],
+        source_urls: /^https?:\/\//i.test(project?.url || '') ? [project.url] : [],
         topicKey: 'hero',
         purpose: 'opening',
         visualIntent: item.visualIntent || 'screenshot',
@@ -143,7 +143,7 @@ export async function writePresentationContent(slidePlan, subjectProfile, projec
   }
 
   // Optional AI copy polish (purpose-angle-aware)
-  if (config.isOpenAiConfigured()) {
+  if (llmAvailable()) {
     try {
       const polished = await polishPresentationCopy(slides, name, project);
       if (polished) return polished;
@@ -277,15 +277,20 @@ function formatSingleCard(text) {
   return `${cleanCardTitle(title)} — ${cleanCardDetail(detail)}`;
 }
 
-function cleanCardTitle(t) { return (t || '').trim().replace(/^[\d\s.\-·]+/, '').slice(0, 32); }
-function cleanCardDetail(d) { return (d || '').trim().slice(0, 72); }
+function boundedCopy(value, limit) {
+  const text = String(value || '').trim();
+  if (text.length <= limit) return text;
+  return text.slice(0, limit - 1).replace(/\s+\S*$/, '').trimEnd() + '…';
+}
+function cleanCardTitle(t) { return boundedCopy((t || '').trim().replace(/^[\d\s.\-·]+/, ''), 32); }
+function cleanCardDetail(d) { return boundedCopy(d, 72); }
 
 function extractSlideStats(claims) {
   const stats = [];
   const seen = new Set();
   for (const c of claims) {
     const txt = typeof c.claim === 'string' ? c.claim : '';
-    const match = txt.match(/([\$₹€£]?\d+[\d,]*(?:\.\d+)?[KMBTkm]?\+?)\s+([a-zA-Z%]+(?:\s+[a-zA-Z]+)?)/);
+    const match = txt.match(/\b(\d[\d,]*(?:\.\d+)?[KMBT]?\+?)\s+(users|customers|attendees|countries|cities|members|downloads|employees|projects|organizations|groups|languages)\b/i);
     if (match && stats.length < 3) {
       const val = match[1].trim();
       const label = match[2].trim();
@@ -304,7 +309,7 @@ function extractSlideStats(claims) {
 // ---------------------------------------------------------------------------
 
 async function polishPresentationCopy(slides, subjectName, project) {
-  const { default: llmModule } = await import('../understanding/llm.js');
+  const llmModule = await import('../understanding/llm.js');
   if (!llmModule?.llmComplete) return null;
 
   // Extract purpose angle from the first non-hero slide that has it
@@ -343,6 +348,7 @@ async function polishPresentationCopy(slides, subjectName, project) {
     '  3. Cards: exactly match input count. Title ≤ 28 chars. Detail ≤ 65 chars, concrete.',
     '  4. NEVER mention web audits, SEO scores, crawl results, or technical web metrics.',
     '  5. Every sentence must trace back to a fact present in the input.',
+    '  6. A title describes one supported claim. Do not attach a version, date or metric to a different benefit unless the input explicitly links them.',
     '',
     'Return ONLY JSON: { "slides": [ { "i": number, "title": string, "subtitle": string, "cards": [ { "title": string, "detail": string } ] } ] }',
   ].join('\n');
@@ -350,7 +356,9 @@ async function polishPresentationCopy(slides, subjectName, project) {
   try {
     const reply = await llmModule.llmComplete(system, JSON.stringify(payload));
     const parsed = JSON.parse(reply.text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, ''));
-    if (!parsed?.slides || !Array.isArray(parsed.slides)) return null;
+    if (!parsed?.slides || !Array.isArray(parsed.slides) || parsed.slides.length !== payload.length) return null;
+    if (new Set(parsed.slides.map(slide => slide.i)).size !== payload.length || parsed.slides.some(slide => !Number.isInteger(slide.i) || slide.i < 0 || slide.i >= payload.length)) return null;
+    console.log('[contentRewriter] AI copy applied:', reply.engine, reply.model, payload.length, 'slides');
 
     const polishedMap = new Map(parsed.slides.map((p) => [p.i, p]));
     let idx = 0;
@@ -359,6 +367,10 @@ async function polishPresentationCopy(slides, subjectName, project) {
       if (s.type === 'hero') return s;
       const p = polishedMap.get(idx++);
       if (!p) return s;
+      const figures = value => (String(value).match(/\d[\d,]*(?:\.\d+)?/g) || []).map(number => number.replace(/,/g, ''));
+      const supplied = new Set(figures([s.title, s.subtitle, ...(s.bullets || [])].join(' ')));
+      const suggested = [p.title, p.subtitle, ...(Array.isArray(p.cards) ? p.cards.flatMap(card => [card.title, card.detail]) : [])].join(' ');
+      if (figures(suggested).some(number => !supplied.has(number))) return s;
 
       const cards = Array.isArray(p.cards)
         ? p.cards.map((c) => `${cleanCardTitle(c.title || '')} — ${cleanCardDetail(c.detail || '')}`)

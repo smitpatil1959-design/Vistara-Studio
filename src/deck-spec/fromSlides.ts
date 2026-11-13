@@ -169,6 +169,8 @@ export function slideToSpec(slide: Slide, index: number): SlideSpec {
     elements,
     transition: (slide.animation as TransitionPreset) || 'fade',
     metadata: { sort_order: slide.sort_order, position: index },
+    notes: '',
+    sources: (slide.source_urls || []).filter(url => /^https?:\/\//.test(url)).map(url => ({ url })),
   };
 }
 

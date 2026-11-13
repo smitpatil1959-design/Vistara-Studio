@@ -16,6 +16,10 @@ export type Spec = PresentationSpec;
 
 export const cloneSpec = (s: Spec): Spec => JSON.parse(JSON.stringify(s)) as Spec;
 
+function cloneSlideDocument(spec: Spec, slideId: string): Spec {
+  return { ...spec, slides: spec.slides.map(slide => slide.id === slideId ? structuredClone(slide) : slide) };
+}
+
 function slideOf(spec: Spec, slideId: string): SlideSpec | null {
   return spec.slides.find((s) => s.id === slideId) || null;
 }
@@ -38,6 +42,11 @@ function elementOf(spec: Spec, slideId: string, elementId: string): SlideElement
 /* ------------------------------------------------------------- elements */
 
 export interface ElementPatch {
+  content?: SlideElement['content'];
+  rotation?: number;
+  locked?: boolean;
+  hidden?: boolean;
+  metadata?: SlideElement['metadata'];
   contentText?: string; // text.text
   imageSrc?: string; // image.src
   imageAlt?: string;
@@ -53,9 +62,14 @@ export interface ElementPatch {
 }
 
 export function updateElement(spec: Spec, slideId: string, elementId: string, patch: ElementPatch): Spec {
-  const next = cloneSpec(spec);
+  const next = cloneSlideDocument(spec, slideId);
   const el = elementOf(next, slideId, elementId);
   if (!el) return spec;
+  if (patch.content && patch.content.kind === el.type) el.content = patch.content;
+  if (patch.rotation !== undefined) el.rotation = patch.rotation;
+  if (patch.locked !== undefined) el.locked = patch.locked;
+  if (patch.hidden !== undefined) el.hidden = patch.hidden;
+  if (patch.metadata) el.metadata = { ...el.metadata, ...patch.metadata };
 
   if (patch.contentText !== undefined && el.content.kind === 'text') (el.content as TextContent).text = patch.contentText;
   if (patch.imageSrc !== undefined && el.content.kind === 'image') (el.content as ImageContent).src = patch.imageSrc;
@@ -89,7 +103,7 @@ export function resizeElementTo(spec: Spec, slideId: string, elementId: string, 
 }
 
 export function duplicateElement(spec: Spec, slideId: string, elementId: string): { spec: Spec; newId: string | null } {
-  const next = cloneSpec(spec);
+  const next = cloneSlideDocument(spec, slideId);
   const slide = slideOf(next, slideId);
   const el = slide ? elementOf(next, slideId, elementId) : null;
   if (!slide || !el) return { spec, newId: null };
@@ -104,12 +118,13 @@ export function duplicateElement(spec: Spec, slideId: string, elementId: string)
     },
   };
   copy.metadata = { ...el.metadata, duplicatedFrom: el.id };
+  if (copy.content.kind === 'group') copy.content.children = copy.content.children.map(child => renewElementIds(child));
   slide.elements.push(copy);
   return { spec: next, newId: copy.id };
 }
 
 export function deleteElement(spec: Spec, slideId: string, elementId: string): Spec {
-  const next = cloneSpec(spec);
+  const next = cloneSlideDocument(spec, slideId);
   const slide = slideOf(next, slideId);
   if (!slide) return spec;
   const strip = (els: SlideElement[]): SlideElement[] =>
@@ -120,7 +135,7 @@ export function deleteElement(spec: Spec, slideId: string, elementId: string): S
 
 /** Layer ordering: flow elements reorder by slot order; absolute elements reorder inside the DOM array. */
 export function reorderElement(spec: Spec, slideId: string, elementId: string, dir: 'up' | 'down'): Spec {
-  const next = cloneSpec(spec);
+  const next = cloneSlideDocument(spec, slideId);
   const slide = slideOf(next, slideId);
   if (!slide) return spec;
   const el = elementOf(next, slideId, elementId);
@@ -178,7 +193,11 @@ export function makeElement(type: ElementType): SlideElement {
     case 'button':
       return baseElement('button', { kind: 'button', label: 'Learn more', href: '#', variant: 'primary' }, 'auto', 'auto');
     case 'chart':
-      return baseElement('chart', { kind: 'chart', chart: 'bars', series: [ { label: 'Q1', value: 44 }, { label: 'Q2', value: 68 }, { label: 'Q3', value: 92 } ] }, 420, 220);
+      return baseElement('chart', { kind: 'chart', chart: 'bars', series: [], dataSource: 'user', legend: true, showValues: true }, 520, 300);
+    case 'table':
+      return baseElement('table', { kind: 'table', rows: [['Heading', 'Heading'], ['Add content', 'Add content']], headerRow: true }, 600, 240);
+    case 'diagram':
+      return baseElement('diagram', { kind: 'diagram', layout: 'process', nodes: [{ id: newSpecId(), label: 'First step' }, { id: newSpecId(), label: 'Next step' }], edges: [] }, 720, 180);
     case 'video':
       return baseElement('video', { kind: 'video', src: '', poster: null, muted: true }, 480, 270);
     case 'group':
@@ -189,7 +208,7 @@ export function makeElement(type: ElementType): SlideElement {
 }
 
 export function addElement(spec: Spec, slideId: string, type: ElementType): { spec: Spec; newId: string | null } {
-  const next = cloneSpec(spec);
+  const next = cloneSlideDocument(spec, slideId);
   const slide = slideOf(next, slideId);
   if (!slide) return { spec, newId: null };
   const el = makeElement(type);
@@ -199,19 +218,20 @@ export function addElement(spec: Spec, slideId: string, type: ElementType): { sp
 
 /* ------------------------------------------------------------- slides */
 
-export function updateSlide(spec: Spec, slideId: string, patch: Partial<Pick<SlideSpec, 'label' | 'layout' | 'transition'>> & { background?: SlideBackground }): Spec {
-  const next = cloneSpec(spec);
+export function updateSlide(spec: Spec, slideId: string, patch: Partial<Pick<SlideSpec, 'label' | 'layout' | 'transition' | 'notes'>> & { background?: SlideBackground }): Spec {
+  const next = cloneSlideDocument(spec, slideId);
   const slide = slideOf(next, slideId);
   if (!slide) return spec;
   if (patch.label !== undefined) slide.label = patch.label;
   if (patch.layout !== undefined) slide.layout = patch.layout;
   if (patch.transition !== undefined) slide.transition = patch.transition;
   if (patch.background !== undefined) slide.background = patch.background;
+  if (patch.notes !== undefined) slide.notes = patch.notes;
   return next;
 }
 
 export function addSlide(spec: Spec, section: SlideSection, label?: string): { spec: Spec; newId: string } {
-  const next = cloneSpec(spec);
+  const next = { ...spec, slides: [...spec.slides] };
   const id = newSpecId();
   next.slides.push({
     id,
@@ -230,27 +250,35 @@ export function addSlide(spec: Spec, section: SlideSection, label?: string): { s
 }
 
 export function duplicateSlide(spec: Spec, slideId: string): { spec: Spec; newId: string | null } {
-  const next = cloneSpec(spec);
+  const next = { ...spec, slides: [...spec.slides] };
   const i = next.slides.findIndex((s) => s.id === slideId);
   if (i === -1) return { spec, newId: null };
   const copy: SlideSpec = JSON.parse(JSON.stringify(next.slides[i]));
   copy.id = newSpecId();
-  copy.elements = copy.elements.map((e) => ({ ...e, id: newSpecId() }));
+  copy.elements = copy.elements.map(renewElementIds);
   copy.label = copy.label + ' copy';
   copy.metadata = { ...copy.metadata, duplicatedFrom: slideId };
   next.slides.splice(i + 1, 0, copy);
   return { spec: next, newId: copy.id };
 }
 
+export function renewElementIds(element: SlideElement): SlideElement {
+  const copy = structuredClone(element);
+  copy.id = newSpecId();
+  delete copy.groupId;
+  if (copy.content.kind === 'group') copy.content.children = copy.content.children.map(child => ({ ...renewElementIds(child), groupId: copy.id }));
+  return copy;
+}
+
 export function deleteSlide(spec: Spec, slideId: string): Spec {
   if (spec.slides.length <= 1) return spec;
-  const next = cloneSpec(spec);
+  const next = { ...spec, slides: [...spec.slides] };
   next.slides = next.slides.filter((s) => s.id !== slideId);
   return next;
 }
 
 export function reorderSlides(spec: Spec, from: number, to: number): Spec {
-  const next = cloneSpec(spec);
+  const next = { ...spec, slides: [...spec.slides] };
   if (from === to || from < 0 || to < 0 || from >= next.slides.length || to >= next.slides.length) return spec;
   const [moved] = next.slides.splice(from, 1);
   next.slides.splice(to, 0, moved);

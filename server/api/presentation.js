@@ -26,10 +26,12 @@ export default async function handler(req, res) {
       const access = await ensureDeckAccess(supabase, req, projectId);
       if (!access.allowed) return res.status(404).json({ error: 'This presentation is private — sign in to view it.' });
 
-      const [{ data: specRow }, { data: slides }] = await Promise.all([
+      const [{ data: specRow, error: specError }, { data: slides, error: slidesError }] = await Promise.all([
         supabase.from('project_specs').select('*').eq('project_id', projectId).maybeSingle(),
         supabase.from('slides').select('*').eq('project_id', projectId).order('sort_order', { ascending: true }),
       ]);
+      if (specError) throw specError;
+      if (slidesError) throw slidesError;
 
       return res.status(200).json({
         projectId,

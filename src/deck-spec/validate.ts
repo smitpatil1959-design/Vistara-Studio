@@ -14,7 +14,7 @@ export interface ValidationResult {
   errors: string[];
 }
 
-const ELEMENT_TYPES: ElementType[] = ['text', 'image', 'icon', 'shape', 'card', 'button', 'chart', 'video', 'group'];
+const ELEMENT_TYPES: ElementType[] = ['text', 'image', 'icon', 'shape', 'card', 'button', 'chart', 'video', 'group', 'table', 'diagram'];
 const PRESETS: AnimationPreset[] = ['none', 'fade', 'rise', 'slide', 'zoom', 'stagger', 'blur', 'scale', 'morph'];
 const TRANSITIONS: TransitionPreset[] = ['fade', 'slide', 'zoom', 'stagger', 'none', 'morph', 'blur'];
 const MOTION_PRESET_IDS = ['cinematic', 'elegant', 'minimal', 'futuristic', 'energetic', 'corporate'];
@@ -74,7 +74,7 @@ function validatePosition(errors: string[], p: unknown, path: string) {
   if (pos.mode === 'absolute' && (!isNum(pos.x) || !isNum(pos.y))) err(errors, path, 'absolute mode requires numeric x and y');
 }
 
-function validateContent(errors: string[], type: ElementType, c: unknown, path: string) {
+function validateContent(errors: string[], type: ElementType, c: unknown, path: string, depth = 0) {
   if (!isObj(c)) return err(errors, path, 'content must be an object');
   const k = (c as { kind?: unknown }).kind;
   if (k !== type) err(errors, path + '.kind', `kind must equal "${type}"`);
@@ -96,6 +96,17 @@ function validateContent(errors: string[], type: ElementType, c: unknown, path: 
       break;
     case 'chart':
       if (!Array.isArray((c as { series?: unknown }).series)) err(errors, path + '.series', 'required array');
+      else for (const point of c.series as unknown[]) {
+        if (!isObj(point) || !isStr(point.label) || !isNum(point.value)) err(errors, path + '.series', 'each point needs a label and finite value');
+      }
+      if (!['bars', 'line', 'area', 'pie', 'donut', 'progress'].includes(String(c.chart))) err(errors, path + '.chart', 'unsupported chart type');
+      break;
+    case 'table':
+      if (!Array.isArray(c.rows) || c.rows.length > 30 || c.rows.some(row => !Array.isArray(row) || row.length > 12 || row.some(cell => !isStr(cell)))) err(errors, path + '.rows', 'requires at most 30 rows of 12 string cells');
+      break;
+    case 'diagram':
+      if (!Array.isArray(c.nodes) || c.nodes.length > 20 || c.nodes.some(node => !isObj(node) || !isStr(node.id) || !isStr(node.label))) err(errors, path + '.nodes', 'requires up to 20 named nodes');
+      if (!Array.isArray(c.edges)) err(errors, path + '.edges', 'required array');
       break;
     case 'card':
       if (!isStr((c as { title?: unknown }).title)) err(errors, path + '.title', 'required');
@@ -106,20 +117,26 @@ function validateContent(errors: string[], type: ElementType, c: unknown, path: 
     case 'group': {
       const children = (c as { children?: unknown }).children;
       if (!Array.isArray(children)) err(errors, path + '.children', 'required array');
-      else children.forEach((child, i) => validateElement(errors, child, `${path}.children[${i}]`));
+      else children.forEach((child, i) => validateElement(errors, child, `${path}.children[${i}]`, depth + 1));
       break;
     }
   }
 }
 
-function validateElement(errors: string[], e: unknown, path: string) {
+function validateElement(errors: string[], e: unknown, path: string, depth = 0) {
+  if (depth > 8) return err(errors, path, 'group nesting exceeds 8');
   if (!isObj(e)) return err(errors, path, 'element must be an object');
   const el = e as Partial<SlideElement>;
   if (!isStr(el.id) || !el.id) err(errors, path + '.id', 'required');
   if (!el.type || !ELEMENT_TYPES.includes(el.type)) err(errors, path + '.type', `unknown type "${String(el.type)}"`);
   validatePosition(errors, el.position, path + '.position');
   if (!isObj(el.size)) err(errors, path + '.size', 'size required');
-  if (el.type) validateContent(errors, el.type, el.content, path + '.content');
+  else for (const key of ['w', 'h'] as const) {
+    const value = el.size[key];
+    if (typeof value === 'number' && (!isNum(value) || value <= 0 || value > 10000)) err(errors, path + '.size.' + key, 'invalid size');
+  }
+  if (el.rotation !== undefined && (!isNum(el.rotation) || Math.abs(el.rotation) > 36000)) err(errors, path + '.rotation', 'invalid rotation');
+  if (el.type) validateContent(errors, el.type, el.content, path + '.content', depth);
   if (!isObj(el.animation)) err(errors, path + '.animation', 'required');
   else if (!(PRESETS as string[]).includes(String(el.animation.preset))) err(errors, path + '.animation.preset', 'unknown preset');
 }
@@ -131,6 +148,10 @@ function validateSlide(errors: string[], s: unknown, path: string) {
   if (!sl.section || !SECTIONS.includes(sl.section)) err(errors, path + '.section', `unknown section "${String(sl.section)}"`);
   if (!isStr(sl.label)) err(errors, path + '.label', 'required label');
   if (!isObj(sl.background)) err(errors, path + '.background', 'required');
+  if (sl.themeOverride !== undefined) {
+    if (!isObj(sl.themeOverride)) err(errors, path + '.themeOverride', 'theme override must be an object');
+    else validateTheme(errors, { skin: 'light', ...sl.themeOverride }, path + '.themeOverride');
+  }
   if (!Array.isArray(sl.elements)) err(errors, path + '.elements', 'required array');
   else sl.elements.forEach((e, i) => validateElement(errors, e, `${path}.elements[${i}]`));
   if (!sl.transition || !TRANSITIONS.includes(sl.transition)) err(errors, path + '.transition', `unknown transition "${String(sl.transition)}"`);
@@ -166,7 +187,7 @@ export function validatePresentation(doc: unknown): ValidationResult {
   const errors: string[] = [];
   if (!isObj(doc)) return { valid: false, errors: ['document must be an object'] };
   const d = doc as Partial<PresentationSpec>;
-  if (d.schemaVersion !== SPEC_VERSION) err(errors, 'schemaVersion', `must be "${SPEC_VERSION}"`);
+  if (d.schemaVersion !== SPEC_VERSION && d.schemaVersion !== 'presentation.v1') err(errors, 'schemaVersion', `must be presentation.v1 or ${SPEC_VERSION}`);
   if (!isStr(d.id)) err(errors, 'id', 'required');
   if (!isStr(d.name)) err(errors, 'name', 'required');
   if (!isObj(d.canvas) || !isNum(d.canvas.width) || !isNum(d.canvas.height)) err(errors, 'canvas', 'width/height numbers required');
@@ -177,6 +198,16 @@ export function validatePresentation(doc: unknown): ValidationResult {
     const ids = new Set<string>();
     d.slides.forEach((s, i) => {
       validateSlide(errors, s, `slides[${i}]`);
+      const elementIds = new Set<string>();
+      const inspect = (elements: SlideElement[], depth = 0) => {
+        if (depth > 8) { err(errors, `slides[${i}]`, 'group nesting exceeds 8'); return; }
+        for (const element of Array.isArray(elements) ? elements : []) {
+          if (elementIds.has(element?.id)) err(errors, `slides[${i}].elements`, 'duplicate element id');
+          elementIds.add(element?.id);
+          if (element?.content?.kind === 'group') inspect(element.content.children, depth + 1);
+        }
+      };
+      inspect((s as SlideSpec).elements);
       const sobj = s as Partial<SlideSpec>;
       if (isStr(sobj.id)) {
         if (ids.has(sobj.id)) err(errors, `slides[${i}].id`, 'duplicate slide id');
@@ -205,10 +236,13 @@ export function normalizeElement(e: Partial<SlideElement>): SlideElement {
       ...(e.position?.mode === 'absolute' ? { x: clampNum(e.position.x, 0, 1280, 0), y: clampNum(e.position.y, 0, 720, 0) } : {}),
     },
     size: { w: e.size?.w ?? 'auto', h: e.size?.h ?? 'auto' },
-    content: (e.content || { kind: 'text', text: '', role: 'body' }) as ElementContent,
+    content: (e.content?.kind === 'group' ? { ...e.content, children: e.content.children.map(child => normalizeElement(child)) } : e.content || { kind: 'text', text: '', role: 'body' }) as ElementContent,
     style: e.style || {},
     animation: { preset: e.animation?.preset && (PRESETS as string[]).includes(e.animation.preset) ? e.animation.preset : 'fade', delayMs: clampNum(e.animation?.delayMs, 0, 3000, 0) },
     metadata: isObj(e.metadata) ? (e.metadata as SlideElement['metadata']) : {},
+    rotation: clampNum(e.rotation, -36000, 36000, 0), zIndex: clampNum(e.zIndex, -1000, 10000, 0),
+    locked: e.locked === true, hidden: e.hidden === true,
+    ...(e.groupId ? { groupId: e.groupId } : {}),
   };
 }
 
@@ -234,10 +268,14 @@ export function normalizePresentation(doc: Partial<PresentationSpec>, defaults: 
     },
     slides: Array.isArray(doc.slides) ? doc.slides.map((s, i) => normalizeSlide(s, i)) : [],
     meta: {
+      ...doc.meta,
       projectUrl: clampStr(doc.meta?.projectUrl),
       purpose: clampStr(doc.meta?.purpose, 'general'),
       source: doc.meta?.source === 'ai-edit' || doc.meta?.source === 'manual-edit' ? doc.meta.source : 'generated',
+      editorVersion: 2,
+      ...(doc.schemaVersion === 'presentation.v1' ? { migratedFrom: 'presentation.v1' } : {}),
     },
+    ...(doc.brand ? { brand: doc.brand } : {}), ...(doc.assets ? { assets: doc.assets } : {}),
     updatedAt: isStr(doc.updatedAt) ? doc.updatedAt : new Date().toISOString(),
   };
 }
@@ -256,6 +294,10 @@ function normalizeSlide(s: Partial<SlideSpec>, i: number): SlideSpec {
     elements: Array.isArray(s.elements) ? s.elements.map((e) => normalizeElement(e as Partial<SlideElement>)) : [],
     transition: s.transition && TRANSITIONS.includes(s.transition) ? s.transition : 'fade',
     metadata: isObj(s.metadata) ? (s.metadata as SlideSpec['metadata']) : {},
+    ...(s.composition ? { composition: s.composition } : {}), notes: clampStr(s.notes),
+    ...(s.themeOverride ? { themeOverride: s.themeOverride } : {}),
+    sources: Array.isArray(s.sources) ? s.sources.filter(source => isStr(source.url) && /^https?:\/\//.test(source.url)) : [],
+    ...(s.validation ? { validation: s.validation } : {}),
   };
 }
 

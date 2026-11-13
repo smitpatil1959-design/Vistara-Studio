@@ -6,22 +6,20 @@
  */
 
 import { FONT_FALLBACKS } from './readiness.js';
-import { validateTarget, safeDispatcher } from '../security.js';
+import { exportImageData } from './imageData.js';
+import { managedAsset } from '../assetAccess.js';
+import { drawElement, pictureBox } from './elements.js';
+import { elementBox, flattenElements } from '../spec/index.js';
+import sharp from 'sharp';
 
 const EMU_PER_PX = 13.333 / 1280; // inches per canvas pixel at 13.33in wide
 const px = (n) => Math.round(n * EMU_PER_PX * 100) / 100;
 const FONT_PT = 0.75; // css px → pt
 
-async function fetchAsDataUri(url) {
-  if (!url || !/^https?:\/\//i.test(url)) return null;
+async function fetchAsDataUri(url, projectId) {
+  if (!url || (!/^https?:\/\//i.test(url) && !managedAsset(url))) return null;
   try {
-    await validateTarget(url);
-    const r = await fetch(url, { signal: AbortSignal.timeout(9000), dispatcher: safeDispatcher });
-    if (!r.ok) return null;
-    const buf = Buffer.from(await r.arrayBuffer());
-    if (buf.length > 4 * 1024 * 1024) return null;
-    const mime = r.headers.get('content-type') || 'image/jpeg';
-    return `data:${mime};base64,${buf.toString('base64')}`;
+    return await exportImageData(url, { projectId });
   } catch {
     return null;
   }
@@ -56,10 +54,11 @@ function addFooter(slide, spec, index) {
   });
 }
 
-export async function buildPptx(spec) {
+export async function buildPptx(spec, { projectId } = {}) {
   const { SlideFactory } = await safePptx();
   const pptx = SlideFactory();
-  pptx.defineLayout({ name: 'VISTARA', width: 13.333, height: 7.5 });
+  const width = 13.333, height = width * spec.canvas.height / spec.canvas.width;
+  pptx.defineLayout({ name: 'VISTARA', width, height });
   pptx.layout = 'VISTARA';
   pptx.author = 'Vistara Studio';
   pptx.title = spec.name;
@@ -69,30 +68,62 @@ export async function buildPptx(spec) {
   const x0 = px(pad + 16);
   const contentW = 13.333 - 2 * x0;
   const bodyFont = FONT_FALLBACKS[spec.theme.typography.bodyFont] || 'Segoe UI';
+  const cached = new Map();
+  const image = url => {
+    if (!cached.has(url)) cached.set(url, fetchAsDataUri(url, projectId));
+    return cached.get(url);
+  };
+  const exportContext = (theme) => ({
+    theme,
+    font: FONT_FALLBACKS[theme.typography.bodyFont] || theme.typography.bodyFont || 'Segoe UI',
+    headingFont: FONT_FALLBACKS[theme.typography.headingFont] || theme.typography.headingFont || 'Segoe UI',
+    image,
+  });
 
   for (let i = 0; i < spec.slides.length; i++) {
     const s = spec.slides[i];
     const slide = pptx.addSlide();
+    const slideTheme = { ...spec.theme, ...s.themeOverride };
+    const context = exportContext(slideTheme);
 
     // background
-    const bgColor = s.background?.type === 'solid' && s.background.value ? hex(s.background.value) : hex(spec.theme.colors.bg);
+    const bgColor = s.background?.type === 'solid' && s.background.value ? hex(s.background.value) : hex(slideTheme.colors.bg);
     slide.background = { color: bgColor };
     if (s.background?.type === 'image' && s.background.value) {
-      const uri = await fetchAsDataUri(s.background.value);
-      if (uri) slide.addImage({ data: uri, x: 0, y: 0, w: '100%', h: '100%' });
+      const bitmap = await image(s.background.value);
+      if (!bitmap) throw new Error('A slide background could not be loaded during export.');
+      slide.addImage(pictureBox(bitmap, { x: 0, y: 0, w: width, h: height }, 'cover'));
+    } else if (s.background?.type === 'gradient') {
+      const colors = s.background.value.match(/#[a-f0-9]{6}\b/gi)?.slice(0, 2) || [spec.theme.colors.bg, spec.theme.colors.surfaceAlt];
+      const angle = (Number(s.background.value.match(/(-?\d+)deg/)?.[1] ?? 135) - 90) * Math.PI / 180;
+      const dx = Math.cos(angle) * 50, dy = Math.sin(angle) * 50;
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="${Math.round(640 * height / width)}"><defs><linearGradient id="g" x1="${50 - dx}%" y1="${50 - dy}%" x2="${50 + dx}%" y2="${50 + dy}%"><stop stop-color="#${hex(colors[0])}"/><stop offset="1" stop-color="#${hex(colors[1] || colors[0])}"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>`;
+      const data = await sharp(Buffer.from(svg)).png().toBuffer();
+      slide.addImage({ data: `data:image/png;base64,${data.toString('base64')}`, x: 0, y: 0, w: width, h: height });
+    }
+    const notes = [s.notes, s.sources?.length ? `Sources:\n${s.sources.map(item => `${item.title ? item.title + ' — ' : ''}${item.url}`).join('\n')}` : ''].filter(Boolean).join('\n\n');
+    if (notes) slide.addNotes(notes);
+    if (s.composition) {
+      const scale = width / spec.canvas.width;
+      for (const element of flattenElements(s.elements)) {
+        const { x, y, w, h } = elementBox(element);
+        await drawElement(slide, pptx, element, { x: x * scale, y: y * scale, w: w * scale, h: h * scale }, context);
+      }
+      continue;
     }
 
-    const slot = (name) => s.elements.filter((e) => e.position.slot === name);
-    const kicker = slot('kicker')[0];
-    const title = slot('title')[0];
-    const subtitle = slot('subtitle')[0];
-    const body = slot('body')[0];
-    const stats = slot('stat').slice(0, 4);
-    const cards = slot('card');
-    const media = slot('media')[0];
-    const actions = slot('action');
-    const videos = s.elements.filter((e) => e.type === 'video');
-    const abs = s.elements.filter((e) => e.position.mode === 'absolute');
+    const visible = s.elements.filter(element => !element.hidden);
+    const slot = (name) => visible.filter((e) => e.position.mode !== 'absolute' && e.position.slot === name);
+    const kicker = slot('kicker').find(element => element.content.kind === 'text');
+    const title = slot('title').find(element => element.content.kind === 'text');
+    const subtitle = slot('subtitle').find(element => element.content.kind === 'text');
+    const body = slot('body').find(element => element.content.kind === 'text');
+    const stats = slot('stat').filter(el => el.type === 'card');
+    const cards = slot('card').filter(el => el.type === 'card');
+    const media = slot('media').find(element => element.content.kind === 'image');
+    const actions = slot('action').filter(element => element.content.kind === 'button');
+    const videos = visible.filter((e) => e.type === 'video' && e.position.mode !== 'absolute');
+    const abs = visible.filter((e) => e.position.mode === 'absolute');
 
     const isCenter = s.layout === 'center' || s.section === 'cta';
     let y = px(pad * 0.9);
@@ -117,10 +148,10 @@ export async function buildPptx(spec) {
 
     // media column (split/left) or centered media
     if (media && media.content.kind === 'image') {
-      const uri = await fetchAsDataUri(media.content.src);
-      if (uri) {
-        if (isCenter) slide.addImage({ data: uri, x: 4.6, y: 4.1, w: 4.1, h: 2.6, sizing: { type: 'cover', w: 4.1, h: 2.6 } });
-        else slide.addImage({ data: uri, x: x0 + contentW * 0.58, y: 0.9, w: contentW * 0.42, h: 3.35, sizing: { type: 'cover', w: contentW * 0.42, h: 3.35 } });
+      const bitmap = await image(media.content.src);
+      if (bitmap) {
+        const box = isCenter ? { x: 4.6, y: 4.1, w: 4.1, h: 2.6 } : { x: x0 + contentW * 0.58, y: 0.9, w: contentW * 0.42, h: 3.35 };
+        slide.addImage(pictureBox(bitmap, box, media.content.fit, media.content.focalPoint));
       } else {
         slide.addShape(pptx.ShapeType.roundRect, { x: x0 + contentW * 0.58, y: 0.9, w: contentW * 0.42, h: 3.35, rectRadius: 0.08, fill: { color: hex(spec.theme.colors.surfaceAlt, 'EFEEE6') }, line: { color: hex(spec.theme.colors.line, 'DDDDDD'), width: 1 } });
         slide.addText('Image unavailable during export', { x: x0 + contentW * 0.58, y: 2.4, w: contentW * 0.42, align: 'center', fontFace: bodyFont, fontSize: 9, color: hex(spec.theme.colors.muted, '888888') });
@@ -147,26 +178,19 @@ export async function buildPptx(spec) {
       const cols = cards.length <= 1 ? 1 : cards.length <= 2 ? 2 : cards.length <= 4 ? 2 : 3;
       const rows = Math.ceil(cards.length / cols);
       const g = 0.18;
-      const startY = stats.length && media ? 0 : stats.length ? 5.0 : isCenter ? 4.4 : 3.55;
-      const card = (cw, chh) => ({
+      const startY = stats.length ? 3.2 : isCenter ? 4.1 : 3.55;
+      const card = () => ({
         w: (contentW - g * (cols - 1)) / cols,
-        h: Math.min(chh, 1.35),
+        h: Math.max(0.4, Math.min(1.35, ((stats.length ? 4.4 : 6.8) - startY - g * (rows - 1)) / rows)),
       });
-      const csize = card(0, 0);
-      cards.slice(0, 6).forEach((c, j) => {
-        const cz = csize;
+      const csize = card();
+      for (const [j, c] of cards.entries()) {
         const col = j % cols;
         const row = Math.floor(j / cols);
-        const x = x0 + col * (csize.w + g);
-        const yy = startY + row * (csize.h + g);
-        if (yy + csize.h > 6.8) return;
-        slide.addShape(pptx.ShapeType.roundRect, { x, y: yy, w: csize.w, h: csize.h, rectRadius: 0.07, fill: { color: hex(spec.theme.colors.surface, 'FFFFFF') }, line: { color: hex(spec.theme.colors.line, 'DDDDDD'), width: 1 } });
-        if (c.content.kind === 'card') {
-          const idx = c.content.index != null ? `${String(c.content.index + 1).padStart(2, '0')} ` : '';
-          slide.addText(idx + (c.content.title || ''), { x: x + 0.16, y: yy + 0.12, w: csize.w - 0.32, fontFace: FONT_FALLBACKS[spec.theme.typography.headingFont] || 'Segoe UI', fontSize: 11, bold: true, color: hex(spec.theme.colors.text) });
-          if (c.content.body) slide.addText(c.content.body, { x: x + 0.16, y: yy + 0.5, w: csize.w - 0.32, h: csize.h - 0.62, fontFace: bodyFont, fontSize: 8.5, color: hex(spec.theme.colors.muted, '777777'), valign: 'top' });
-        }
-      });
+        await drawElement(slide, pptx, c, {
+          x: x0 + col * (csize.w + g), y: startY + row * (csize.h + g), w: csize.w, h: csize.h,
+        }, context);
+      }
       void rows;
     }
 
@@ -192,29 +216,19 @@ export async function buildPptx(spec) {
       ], { x: vx + 0.18, y: vy + 0.16, w: (isCenter ? 4.1 : 4.4) - 0.36, h: 0.75, ...(vc?.src ? { hyperlink: { url: vc.src } } : {}) });
     });
 
-    // absolute elements: exact stage coordinates
-    for (const el of abs) {
-      const x = px(el.position.x ?? 0);
-      const y = px(el.position.y ?? 0);
-      const w = px(typeof el.size.w === 'number' ? el.size.w : 200);
-      const h = px(typeof el.size.h === 'number' ? el.size.h : 80);
-      if (el.type === 'text' && el.content.kind === 'text') {
-        slide.addText(richText(spec.theme, el.content.text, el.style?.fontSize ?? 17, (el.style?.fontWeight ?? 500) >= 600 ? 'bold' : 'normal'), { x, y, w, h, valign: 'top' });
-      } else if (el.type === 'image' && el.content.kind === 'image') {
-        const uri = await fetchAsDataUri(el.content.src);
-        if (uri) slide.addImage({ data: uri, x, y, w, h });
-      } else if (el.type === 'shape') {
-        slide.addShape(pptx.ShapeType.rect, { x, y, w, h, fill: { color: hex(el.style?.backgroundColor || spec.theme.colors.surfaceAlt, 'EFEEE6') } });
-      } else if (el.type === 'card' && el.content.kind === 'card') {
-        slide.addShape(pptx.ShapeType.roundRect, { x, y, w, h, rectRadius: 0.07, fill: { color: hex(spec.theme.colors.surface, 'FFFFFF') }, line: { color: hex(spec.theme.colors.line, 'DDDDDD'), width: 1 } });
-        slide.addText(`${el.content.title}${el.content.body ? '\n' + el.content.body : ''}`, { x: x + 0.14, y: y + 0.1, w: w - 0.28, h: h - 0.2, fontFace: bodyFont, fontSize: 9.5, color: hex(spec.theme.colors.text), valign: 'top' });
-      } else if (el.type === 'chart' && el.content.kind === 'chart' && el.content.series.length) {
-        const labels = el.content.series.map((p) => String(p.label).slice(0, 6));
-        const values = el.content.series.map((p) => (Number.isFinite(p.value) ? Number(p.value) : 0));
-        try {
-          slide.addChart(pptx.ChartType.bar, [{ name: 'series', labels, values }], { x, y, w, h, barDir: 'bar', chartColors: [hex(spec.theme.colors.accent)], fontFace: bodyFont, catAxisLabelFontSize: 8 });
-        } catch { /* chart data rejected — readiness report already flags it */ }
-      }
+    const consumed = new Set([kicker, title, subtitle, body, media, ...stats, ...cards, ...actions, ...videos].filter(Boolean).map(element => element.id));
+    const extras = visible.filter(element => element.position.mode !== 'absolute' && !consumed.has(element.id));
+    for (let index = 0; index < extras.length; index++) {
+      const element = extras[index];
+      const height = Math.max(0.4, 3.1 / Math.max(1, extras.length));
+      await drawElement(slide, pptx, element, { x: x0, y: 3.4 + index * height, w: contentW, h: height - 0.08 }, context);
+    }
+    for (const element of abs) {
+      await drawElement(slide, pptx, element, {
+        x: px(element.position.x || 0), y: px(element.position.y || 0),
+        w: px(typeof element.size.w === 'number' ? element.size.w : 200),
+        h: px(typeof element.size.h === 'number' ? element.size.h : 80),
+      }, context);
     }
 
     addFooter(slide, spec, i);

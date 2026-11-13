@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ChevronLeft, Radar, FileSearch, PenTool, LayoutDashboard, Gauge, BrainCircuit, RefreshCw, ShieldCheck, BookOpen } from 'lucide-react';
 import Logo from '../components/layout/Logo';
 import Ambient from '../components/layout/Ambient';
-import { generatePresentation, getProject, updateProject } from '../services';
+import { generatePresentation, getProject, getSlides, updateProject } from '../services';
 import { useProjectDetail } from '../hooks/useProjectDetail';
 import { hostOf } from '../lib/format';
 import type { DeckTheme, Project, PresentationPurpose, Slide, AnyUnderstanding } from '../types';
@@ -67,11 +67,21 @@ export default function Studio() {
   const setStage = (s: StudioStage) => setStageOverride(s);
   const setTab = (t: ReportTab) => setTabOverride(t);
 
-  const onAnalyzed = useCallback((p: Project) => {
+  const onAnalyzed = useCallback(async (p: Project) => {
+    if (p.status === 'generated') {
+      try {
+        setSlides(await getSlides(p.id));
+        setProject(p);
+        setStageOverride('editor');
+        return;
+      } catch {
+        setGenError('The presentation is saved, but slides could not be loaded. Refresh to retry.');
+      }
+    }
     setProject(p);
     setStageOverride('report');
     setTabOverride('research'); // default to Research tab after analysis
-  }, [setProject]);
+  }, [setProject, setSlides]);
 
   const onGenerated = useCallback(
     (nextSlides: Slide[], p?: Project) => {
@@ -93,7 +103,7 @@ export default function Studio() {
       if (!fresh.analysis) throw new Error('Research data is not available. Please run the research pipeline first.');
       const { slides: newSlides } = await generatePresentation(project.id);
       if (!newSlides || newSlides.length === 0) throw new Error('The generator returned no sections.');
-      onGenerated(newSlides, fresh);
+      onGenerated(newSlides, { ...fresh, status: 'generated' });
     } catch (e) {
       const message = e instanceof Error ? e.message : 'Presentation generation failed.';
       const ref = (e as { requestId?: string }).requestId;
@@ -143,7 +153,7 @@ export default function Studio() {
       <Ambient intensity={stage === 'editor' ? 0.35 : 0.9} />
 
       {/* top bar */}
-      <header className="sticky top-0 z-40 glass-deep border-b border-line">
+      {stage !== 'editor' && <header className="sticky top-0 z-40 glass-deep border-b border-line">
         <div className="px-5 h-14 flex items-center gap-4">
           <Link to="/dashboard" className="text-fog hover:text-ink transition-colors flex items-center gap-1.5 text-[13px] shrink-0">
             <ChevronLeft size={15} />
@@ -193,12 +203,12 @@ export default function Studio() {
           <div
             className="h-full transition-all duration-700"
             style={{
-              width: stage === 'crawl' ? '28%' : stage === 'report' ? '62%' : '100%',
+              width: stage === 'crawl' ? '28%' : '62%',
               background: 'linear-gradient(90deg,#9db494,#d9f26b)',
             }}
           />
         </div>
-      </header>
+      </header>}
 
       {/* stages */}
       {stage === 'crawl' && <CrawlStage key={project.id + project.status} project={project} onAnalyzed={onAnalyzed} />}

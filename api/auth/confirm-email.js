@@ -1,1 +1,1 @@
-export { default, maxDuration } from '../auth-confirm.js';
+export { default, maxDuration } from '../../server/api/auth-confirm.js';

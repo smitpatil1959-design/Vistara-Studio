@@ -1,12 +1,39 @@
 /**
  * LLM providers for interpretation. Server-side only — keys are read from
  * process.env and NEVER exposed to the browser bundle. Priority order:
- * OpenAI → Anthropic → Google. A provider is eligible only when its key is
+ * NVIDIA → OpenAI → Anthropic → Google. A provider is eligible only when its key is
  * configured; with none configured the service falls back to the rules
  * interpreter (clearly labeled in meta.engine).
  */
 
 const TIMEOUT_MS = 22000;
+
+async function nvidia(system, user) {
+  const key = process.env.NVIDIA_API_KEY;
+  if (!key) return null;
+  const model = process.env.NVIDIA_MODEL || 'nvidia/nemotron-3-ultra-550b-a55b';
+  const base = (process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, '');
+  const response = await fetch(`${base}/chat/completions`, {
+    method: 'POST', signal: AbortSignal.timeout(90000),
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+    body: JSON.stringify({ model, stream: false, temperature: 0.2, max_tokens: 6500,
+      ...(model.includes('nemotron-3-ultra') ? { reasoning_effort: 'none' } : {}),
+      messages: [{ role: 'system', content: `${system}\nRespond with a single JSON object only.` }, { role: 'user', content: user }],
+    }),
+  });
+  if (!response.ok) throw new Error(`NVIDIA request failed (${response.status}). Check the key, model access and rate limit.`);
+  const data = await response.json();
+  if (data.choices?.[0]?.finish_reason === 'length') throw new Error('NVIDIA response exceeded the output limit. Return more compact JSON.');
+  const text = data.choices?.[0]?.message?.content;
+  if (typeof text !== 'string' || !text.trim()) throw new Error('NVIDIA returned no generated content.');
+  return { engine: 'nvidia', model, text };
+}
+
+function providers() {
+  const selected = (process.env.AI_PROVIDER || 'auto').toLowerCase();
+  const choices = { nvidia: [nvidia], openai: [openAI], anthropic: [anthropic], google: [gemini], none: [] };
+  return choices[selected] || [nvidia, openAI, anthropic, gemini];
+}
 
 function sys(extra = '') {
   return [
@@ -17,6 +44,7 @@ function sys(extra = '') {
     '3. basis="fact" ONLY when the value is literally supported by the scan data (title, meta, headings, pages, tech signals, link labels, measured metrics). Otherwise basis="inferred".',
     '4. Never invent customers, pricing, metrics or claims absent from the scan data. When evidence is thin, mark inferred with confidence ≤ 0.5.',
     '5. evidence entries must quote the scan data path, e.g. "meta.og:title", "H2: Features", "page/pricing 200 · 431ms", "tech: Next.js".',
+    '6. Keep the response compact: at most 3 entries per list, at most 2 short evidence references per value, and at most 25 words per value. Omit unsupported optional entries.',
     extra,
   ].filter(Boolean).join('\n');
 }
@@ -59,7 +87,16 @@ async function openAI(system, user) {
       ],
     }),
   });
-  if (!res.ok) throw new Error(`openai ${res.status}`);
+  if (!res.ok) {
+    const failure = await res.json().catch(() => ({}));
+    const code = String(failure.error?.code || '').replace(/[^a-z0-9_]/gi, '').slice(0, 80);
+    const error = new Error(['credit_balance_exhausted', 'insufficient_quota'].includes(code)
+      ? 'OpenAI API credits exhausted (429). Add credits or configure a funded key.'
+      : `OpenAI request failed (${res.status}${code ? `: ${code}` : ''}).`);
+    error.code = code;
+    error.status = res.status;
+    throw error;
+  }
   const data = await res.json();
   return { engine: 'openai', model, text: data.choices?.[0]?.message?.content || '' };
 }
@@ -107,12 +144,13 @@ async function gemini(system, user) {
 }
 
 export function llmAvailable() {
-  return !!(process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.GOOGLE_GENERATIVE_AI_KEY || process.env.GEMINI_API_KEY);
+  const keys = new Map([[nvidia, process.env.NVIDIA_API_KEY], [openAI, process.env.OPENAI_API_KEY], [anthropic, process.env.ANTHROPIC_API_KEY], [gemini, process.env.GOOGLE_GENERATIVE_AI_KEY || process.env.GEMINI_API_KEY]]);
+  return providers().some(provider => !!keys.get(provider));
 }
 
 /** Runs the first configured provider. Throws the provider's last error. */
 export async function llmInterpret(factsJSON, prevError) {
-  const chain = [openAI, anthropic, gemini];
+  const chain = providers();
   let lastErr = new Error('no provider configured');
   for (const provider of chain) {
     try {
@@ -127,7 +165,7 @@ export async function llmInterpret(factsJSON, prevError) {
 
 /** Generic single-shot completion for copy passes (copy polish, paraphrase). */
 export async function llmComplete(system, user) {
-  const chain = [openAI, anthropic, gemini];
+  const chain = providers();
   let lastErr = new Error('no provider configured');
   for (const provider of chain) {
     try {

@@ -38,14 +38,14 @@ const SOURCE_AUTHORITY = {
  * @param {string} projectId
  * @returns {Promise<{ claimsCreated: number, errors: string[] }>}
  */
-export async function generateClaimsFromEvidence(projectId) {
+export async function generateClaimsFromEvidence(projectId, sessionId) {
   const results = { claimsCreated: 0, errors: [] };
 
   try {
     const { data: evidence, error: fetchErr } = await supabase
       .from('evidence')
       .select('*, sources(url, source_type, hierarchy_score, publication_date)')
-      .eq('project_id', projectId);
+      .eq('project_id', projectId).eq('research_session_id', sessionId);
 
     if (fetchErr) {
       results.errors.push(`Failed to fetch evidence: ${fetchErr.message}`);
@@ -60,22 +60,24 @@ export async function generateClaimsFromEvidence(projectId) {
     // Group by claim type + semantic key (not just raw normalized text)
     const claimGroups = groupEvidenceByClaims(evidence);
 
+    const rows = [];
     for (const [, items] of claimGroups) {
       try {
         // Pick the best representative text from the group
         const representativeText = pickRepresentativeText(items);
         if (!representativeText || !isHighQualityContent(representativeText)) continue;
 
-        const claim = createClaimFromEvidence(projectId, representativeText, items);
-        const { error } = await supabase.from('claims').insert(claim);
-        if (error) {
-          results.errors.push(`Claim insert: ${error.message}`);
-        } else {
-          results.claimsCreated++;
-        }
+        const claim = { ...createClaimFromEvidence(projectId, representativeText, items), research_session_id: sessionId };
+        rows.push(claim);
       } catch (err) {
         results.errors.push(`Claim creation: ${err.message}`);
       }
+    }
+    for (let offset = 0; offset < rows.length; offset += 40) {
+      const batch = rows.slice(offset, offset + 40);
+      const { error } = await supabase.from('claims').insert(batch);
+      if (error) results.errors.push(`Claim insert: ${error.message}`);
+      else results.claimsCreated += batch.length;
     }
   } catch (err) {
     results.errors.push(`Evidence processing failed: ${err.message}`);
@@ -97,9 +99,9 @@ function groupEvidenceByClaims(evidence) {
     const text = cleanExtractedText(raw);
     if (!text || !isHighQualityContent(text)) continue;
 
-    // Key: claim type + normalized semantic prefix (first 80 chars lowercased)
-    const prefix = text.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').slice(0, 80);
-    const key = `${item.claim_type}::${prefix}`;
+    // Similar openings can report different values, periods or conditions.
+    // Merge only the same statement, preserving currency and punctuation.
+    const key = `${item.claim_type}::${normalizeForDedup(text)}`;
 
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ ...item, extracted_text: text });
@@ -214,12 +216,13 @@ function calculateConfidence(items, status) {
  * @param {string} projectId
  * @returns {Promise<Array>} Conflict records
  */
-export async function detectClaimConflicts(projectId) {
+export async function detectClaimConflicts(projectId, sessionId) {
   try {
     const { data: claims, error } = await supabase
       .from('claims')
       .select('*')
       .eq('project_id', projectId)
+      .eq('research_session_id', sessionId)
       .in('status', ['verified', 'supported']);
 
     if (error || !claims || claims.length < 2) return [];
@@ -277,10 +280,11 @@ export async function detectClaimConflicts(projectId) {
  * Avoids marking "Zomato delivers food" and "Zomato is a SaaS" as contradictions —
  * those are complementary. Looks for genuine factual conflicts.
  */
-function areContradictory(a, b) {
+export function areContradictory(a, b) {
   if (!a || !b) return false;
-  const na = a.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
-  const nb = b.toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+  const normalize = text => text.toLowerCase().replace(/(\d),(?=\d{3}\b)/g, '$1').replace(/[^a-z0-9.\s]/g, '').replace(/\s+/g, ' ').trim();
+  const na = normalize(a);
+  const nb = normalize(b);
 
   // Exact match — duplicate, not conflict
   if (na === nb) return false;
@@ -289,13 +293,16 @@ function areContradictory(a, b) {
   if (na.length < 15 || nb.length < 15) return false;
 
   // Numeric contradictions: both mention a number but different numbers for same entity
-  const numA = na.match(/\b\d[\d,]*\b/g) || [];
-  const numB = nb.match(/\b\d[\d,]*\b/g) || [];
+  const numA = na.match(/\b\d+(?:\.\d+)?\b/g) || [];
+  const numB = nb.match(/\b\d+(?:\.\d+)?\b/g) || [];
   if (numA.length > 0 && numB.length > 0) {
     // Normalize numbers (remove commas)
     const setA = new Set(numA.map(n => n.replace(/,/g, '')));
     const setB = new Set(numB.map(n => n.replace(/,/g, '')));
-    // If no numbers in common but both have numbers — potential conflict
+    // Different metrics (users vs cities, revenue vs funding) are compatible.
+    // Only compare quantities in the same assertion, including its date/unit.
+    const skeleton = text => text.replace(/\b\d+(?:\.\d+)?\b/g, '#');
+    if (skeleton(na) !== skeleton(nb)) return false;
     const hasOverlap = [...setA].some(n => setB.has(n));
     if (!hasOverlap && setA.size > 0 && setB.size > 0) return true;
   }
@@ -311,13 +318,19 @@ function areContradictory(a, b) {
  */
 export async function getVerifiedClaims(projectId, claimType = null) {
   try {
+    const { data: session, error: sessionError } = await supabase.from('research_sessions').select('id, status').eq('project_id', projectId).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (sessionError) throw sessionError;
+    if (!session || !['completed', 'partial'].includes(session.status)) return [];
+    const sessionId = session.id;
+
     let query = supabase
       .from('claims')
       .select('*')
       .eq('project_id', projectId)
+      .eq('research_session_id', sessionId)
       .in('status', ['verified', 'supported'])
       .order('confidence', { ascending: false })
-      .limit(150);
+      .limit(350);
 
     if (claimType) query = query.eq('claim_type', claimType);
 
@@ -335,11 +348,11 @@ export async function getVerifiedClaims(projectId, claimType = null) {
  * @param {string} projectId
  * @returns {Promise<{ removed: number, errors: string[] }>}
  */
-export async function removeDuplicateClaims(projectId) {
+export async function removeDuplicateClaims(projectId, sessionId) {
   const results = { removed: 0, errors: [] };
 
   try {
-    const { data: claims, error } = await supabase.from('claims').select('*').eq('project_id', projectId);
+    const { data: claims, error } = await supabase.from('claims').select('*').eq('project_id', projectId).eq('research_session_id', sessionId);
     if (error) { results.errors.push(error.message); return results; }
 
     const groups = new Map();
@@ -367,5 +380,5 @@ export async function removeDuplicateClaims(projectId) {
 
 function normalizeForDedup(text) {
   if (typeof text !== 'string') return '';
-  return text.toLowerCase().trim().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').slice(0, 100);
+  return text.normalize('NFC').toLowerCase().trim().replace(/\s+/g, ' ');
 }

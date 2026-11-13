@@ -5,22 +5,13 @@
  * explicitly (never silently dropped).
  */
 
-import { validatePresentation } from '../../server/spec/index.js';
-import { validateTarget, safeDispatcher } from '../security.js';
+import { fitFont, flattenElements, validatePresentation } from '../spec/index.js';
+import { exportImageData } from './imageData.js';
 
-const HEAD_TIMEOUT = 4500;
-
-async function assetReachable(url) {
+async function assetReachable(url, projectId) {
   try {
-    await validateTarget(url);
-    const r = await fetch(url, { method: 'HEAD', redirect: 'manual', signal: AbortSignal.timeout(HEAD_TIMEOUT), dispatcher: safeDispatcher });
-    let status = r.status;
-    if (status === 405 || status === 501) {
-      const g = await fetch(url, { method: 'GET', redirect: 'manual', signal: AbortSignal.timeout(HEAD_TIMEOUT), dispatcher: safeDispatcher });
-      status = g.status;
-      try { if (g.body) await g.body.cancel(); } catch { /* closed */ }
-    }
-    return { ok: status < 400, status };
+    const { status } = await exportImageData(url, { timeoutMs: 6500, projectId });
+    return { ok: true, status };
   } catch {
     return { ok: false, status: 0 };
   }
@@ -39,14 +30,17 @@ export function estimateFieldWidth(text, fontSize) {
   return String(text || '').length * fontSize * 0.54;
 }
 
-export async function buildReadinessReport(spec, { format = 'pptx', probeAssets = true } = {}) {
+export async function buildReadinessReport(spec, { format = 'pptx', probeAssets = true, projectId } = {}) {
   const findings = [];
   const add = (severity, kind, message, target) => findings.push({ severity, kind, message, target });
 
   // ---- 1. schema truth
   const v = validatePresentation(spec);
-  if (!v.valid) v.errors.slice(0, 8).forEach((e) => add('block', 'schema', `Spec invalid — ${e}`));
-  else add('ok', 'schema', `presentation.v1 validates cleanly (${spec.slides.length} slides)`);
+  if (!v.valid) {
+    v.errors.slice(0, 8).forEach((e) => add('block', 'schema', `Spec invalid — ${e}`));
+    return { format, ready: false, counts: { block: findings.length, warn: 0, note: 0, ok: 0 }, findings, generatedAt: new Date().toISOString() };
+  }
+  else add('ok', 'schema', `${spec.schemaVersion} validates cleanly (${spec.slides.length} slides)`);
 
   const font = spec.theme?.typography?.headingFont || 'Inter';
   const direct = FONT_FALLBACKS[font];
@@ -63,13 +57,24 @@ export async function buildReadinessReport(spec, { format = 'pptx', probeAssets 
   let clipRisks = 0;
 
   for (const slide of spec.slides) {
-    for (const el of slide.elements) {
+    if (slide.background?.type === 'image' && slide.background.value) images.push({ slide: slide.label, id: `${slide.id}:background`, src: slide.background.value });
+    if (format === 'pptx') {
+      if (slide.background?.type === 'gradient') add('note', 'element', `Slide “${slide.label}”: gradient exports as a bitmap background; slide content stays editable.`, slide.label);
+    }
+    const visit = elements => elements.filter(el => !el.hidden).flatMap(el => el.content.kind === 'group' ? visit(el.content.children) : [el]);
+    for (const el of slide.composition ? flattenElements(slide.elements) : visit(slide.elements)) {
       if (el.animation?.preset && el.animation.preset !== 'none') {
         animated.push(el.id);
         animKinds.set(el.animation.preset, (animKinds.get(el.animation.preset) || 0) + 1);
       }
-      if (el.type === 'video') videos.push({ slide: slide.label, id: el.id });
+      if (el.content.kind === 'video') {
+        videos.push({ slide: slide.label, id: el.id });
+        if (el.content.poster) images.push({ slide: slide.label, id: el.id, src: el.content.poster });
+      }
       if (el.type === 'image') images.push({ slide: slide.label, id: el.id, src: el.content.kind === 'image' ? el.content.src : '' });
+      if (el.content.kind === 'chart' && !el.content.series.length) add('warn', 'element', `Slide “${slide.label}”: chart has no data and exports as a text placeholder.`, slide.label);
+      if (format === 'pptx' && el.content.kind === 'chart' && el.content.chart === 'progress') add('note', 'element', `Slide “${slide.label}”: progress rows export as an editable horizontal bar chart.`, slide.label);
+      if (format === 'pptx' && el.rotation && ['chart', 'table', 'diagram'].includes(el.type)) add('warn', 'element', `Slide “${slide.label}”: PowerPoint keeps the ${el.type} editable and upright.`, slide.label);
       if (el.position.mode === 'absolute') {
         absCount++;
         const x = el.position.x ?? 0;
@@ -80,8 +85,9 @@ export async function buildReadinessReport(spec, { format = 'pptx', probeAssets 
       }
       if (el.type === 'text' && el.content.kind === 'text') {
         const size = el.style?.fontSize ?? (el.content.role === 'title' ? 56 : el.content.role === 'subtitle' ? 20 : 17);
-        const avail = spec.canvas.width - 2 * ((spec.theme?.spacing?.sectionGap ?? 48) + 16);
-        if (estimateFieldWidth(el.content.text, size) > avail * 1.15)
+        const avail = typeof el.size.w === 'number' ? el.size.w : spec.canvas.width - 2 * ((spec.theme?.spacing?.sectionGap ?? 48) + 16);
+        const overflow = typeof el.size.h === 'number' ? fitFont(el.content.text, avail, el.size.h, size, 1, el.style?.lineHeight || 1.4) < size - 1 : estimateFieldWidth(el.content.text, size) > avail * 1.15;
+        if (overflow)
           add('warn', 'overflow', `“${el.content.text.slice(0, 38)}…” likely overflows its canvas at ${size}px`, slide.label);
       }
     }
@@ -106,11 +112,14 @@ export async function buildReadinessReport(spec, { format = 'pptx', probeAssets 
 
   // ---- 3. asset reachability, live
   if (probeAssets && images.length) {
-    const probe = images.slice(0, 10);
-    const results = await Promise.all(probe.map(async (i) => ({ ...i, r: i.src ? await assetReachable(i.src) : { ok: false, status: 0 } })));
+    const probe = [...new Map(images.map(i => [i.src, i])).values()];
+    const results = [];
+    for (let index = 0; index < probe.length; index += 4) {
+      results.push(...await Promise.all(probe.slice(index, index + 4).map(async (i) => ({ ...i, r: i.src ? await assetReachable(i.src, projectId) : { ok: false, status: 0 } }))));
+    }
     const broken = results.filter((r) => !r.r.ok || !r.src);
     if (broken.length === 0) add('ok', 'asset', `${probe.length} imagery references fetched healthy`);
-    else for (const b of broken) add('block', 'asset', `Missing image on slide “${b.slide}” (${b.src ? 'HTTP ' + b.r.status : 'no source'})`, b.slide);
+    else for (const b of broken) add('block', 'asset', `Image on slide “${b.slide}” ${b.src ? 'could not be fetched or decoded' : 'has no source'}`, b.slide);
   } else if (images.length) {
     add('note', 'asset', `${images.length} imagery references — reachability probe skipped for speed`);
   }

@@ -4,6 +4,8 @@
  * in memory; only optimized derivatives persist.
  */
 
+import { sniffImageMime } from './ratelimit.js';
+
 export const ASSET_BUCKET = 'assets';
 export const ASSET_MAX_INPUT_BYTES = 6 * 1024 * 1024; // 6MB upload guard (api body → base64)
 export const ASSET_MAIN_MAX_W = 1920;
@@ -34,18 +36,21 @@ const extFor = (mime) => (mime === 'image/png' ? 'png' : mime === 'image/webp' ?
 export async function optimizeImage(input, { crop = null } = {}) {
   const sharpInst = await loadSharp();
   if (!sharpInst) {
-    return { main: input, thumb: null, width: null, height: null, mime: 'image/jpeg', optimized: false };
+    if (crop) throw new Error('Image cropping is unavailable. Install the image processing dependency.');
+    return { main: input, thumb: null, width: null, height: null, mime: sniffImageMime(input), optimized: false };
   }
   try {
     let pipe = sharpInst(input, { failOn: 'none' }).rotate(); // respects EXIF orientation
-    if (crop && crop.w > 8 && crop.h > 8) pipe = pipe.extract({ left: Math.max(0, Math.round(crop.x)), top: Math.max(0, Math.round(crop.y)), width: Math.round(crop.w), height: Math.round(crop.h) });
-    const meta = await pipe.metadata();
-    const main = await sharpInst(await pipe.toBuffer()).resize({ width: ASSET_MAIN_MAX_W, withoutEnlargement: true }).jpeg({ quality: ASSET_MAIN_QUALITY, mozjpeg: true }).toBuffer();
-    const thumb = await sharpInst(await pipe.toBuffer()).resize({ width: ASSET_THUMB_W, withoutEnlargement: true }).jpeg({ quality: ASSET_THUMB_QUALITY, mozjpeg: true }).toBuffer();
-    return { main, thumb, width: meta.width ?? null, height: meta.height ?? null, mime: 'image/jpeg', optimized: true };
+    if (crop) pipe = pipe.extract({ left: Math.max(0, Math.round(crop.x)), top: Math.max(0, Math.round(crop.y)), width: Math.round(crop.w), height: Math.round(crop.h) });
+    const oriented = await pipe.toBuffer();
+    const { data: main, info } = await sharpInst(oriented).resize({ width: ASSET_MAIN_MAX_W, withoutEnlargement: true }).jpeg({ quality: ASSET_MAIN_QUALITY, mozjpeg: true }).toBuffer({ resolveWithObject: true });
+    const thumb = await sharpInst(oriented).resize({ width: ASSET_THUMB_W, withoutEnlargement: true }).jpeg({ quality: ASSET_THUMB_QUALITY, mozjpeg: true }).toBuffer();
+    return { main, thumb, width: info.width, height: info.height, mime: 'image/jpeg', optimized: true };
   } catch (e) {
     console.warn('[assets] optimize failed:', e.message);
-    return { main: input, thumb: null, width: null, height: null, mime: null, optimized: false };
+    if (crop) throw new Error('Crop region is outside the image or the image could not be processed.');
+    if (!sniffImageMime(input)) throw new Error('Image could not be decoded.');
+    return { main: input, thumb: null, width: null, height: null, mime: sniffImageMime(input), optimized: false };
   }
 }
 

@@ -8,7 +8,7 @@ import { IconElement } from './IconElement';
 import { ShapeElement } from './ShapeElement';
 import { CardElement } from './CardElement';
 import { ButtonElement } from './ButtonElement';
-import { ChartElement } from './ChartElement';
+import { ChartElement, TableElement, DiagramElement } from './DataElements';
 import { VideoElement } from './VideoElement';
 import { GroupElement } from './GroupElement';
 
@@ -19,6 +19,7 @@ export function Element({ element, depth = 0, staggerBase = 0 }: { element: Slid
   if (!element || !element.content || !element.type) {
     return <UnsupportedTile label="malformed element" />;
   }
+  if (element.hidden) return null;
 
   // deterministic: explicit delay wins; otherwise order × stagger cadence
   const delayMs = (element.animation?.delayMs ?? 0) + staggerBase * ctx.motion.delayStaggerMs;
@@ -34,6 +35,8 @@ export function Element({ element, depth = 0, staggerBase = 0 }: { element: Slid
           height: typeof element.size.h === 'number' ? element.size.h : 'auto',
         }
       : { position: 'relative' };
+  style.opacity = element.style.opacity ?? 1;
+  style.zIndex = element.zIndex;
 
   let body: React.ReactNode;
   switch (element.type) {
@@ -41,7 +44,7 @@ export function Element({ element, depth = 0, staggerBase = 0 }: { element: Slid
       body = element.content.kind === 'text' ? <TextElement content={element.content} style={element.style} /> : <UnsupportedTile label="text: bad content" />;
       break;
     case 'image':
-      body = element.content.kind === 'image' ? <ImageElement content={element.content} style={element.style} size={element.size} /> : <UnsupportedTile label="image: bad content" />;
+      body = element.content.kind === 'image' ? <ImageElement key={element.content.src} content={element.content} style={element.style} size={element.size} /> : <UnsupportedTile label="image: bad content" />;
       break;
     case 'icon':
       body = element.content.kind === 'icon' ? <IconElement content={element.content} style={element.style} /> : <UnsupportedTile label="icon: bad content" />;
@@ -64,6 +67,12 @@ export function Element({ element, depth = 0, staggerBase = 0 }: { element: Slid
     case 'group':
       body = element.content.kind === 'group' ? <GroupElement content={element.content} depth={depth} /> : <UnsupportedTile label="group: bad content" />;
       break;
+    case 'table':
+      body = element.content.kind === 'table' ? <TableElement content={element.content} style={element.style} /> : null;
+      break;
+    case 'diagram':
+      body = element.content.kind === 'diagram' ? <DiagramElement content={element.content} style={element.style} size={element.size} /> : null;
+      break;
     default:
       body = <UnsupportedTile label={`unsupported: ${String(element.type)}`} />;
   }
@@ -72,7 +81,9 @@ export function Element({ element, depth = 0, staggerBase = 0 }: { element: Slid
     'data-el-id': element.id,
     'data-el-type': element.type,
     'data-el-slot': element.position.slot || (element.position.mode === 'absolute' ? 'absolute' : 'body'),
+    'data-locked': element.locked || undefined,
   };
+  if (element.rotation) body = <div className="w-full h-full" style={{ transform: `rotate(${element.rotation}deg)`, transformOrigin: 'center' }}>{body}</div>;
 
   if (!animate) {
     return (

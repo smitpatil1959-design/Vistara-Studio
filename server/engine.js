@@ -10,6 +10,8 @@ import { decideSlideVisual, generateVisualBrief, searchAndRankVisuals } from './
 import { validateSlideLayout, repairSlideSpatialCollision } from './layoutEngine.js';
 import { critiqueAndRepairDeck, analyzeDeckQuality, analyzeSlideQuality } from './qualityEngine.js';
 import { randomUUID } from 'node:crypto';
+import { isHighQualityContent, cleanExtractedText } from './presentation/extractionQuality.js';
+import { deriveBrandKit } from './spec/index.js';
 
 
 
@@ -173,17 +175,18 @@ function getHeadings(html) {
 function getParagraphs(html) {
   const clean = contentOnly(html);
   const out = [];
-  const re = /<p[^>]*>([\s\S]*?)<\/p>/gi;
+  const re = /<(p|li)\b[^>]*>([\s\S]*?)<\/\1>/gi;
   let m;
   while ((m = re.exec(clean)) && out.length < 60) {
-    const t = stripTags(m[1]);
-    if (t.length > 40 && t.length < 600) out.push(t);
+    const t = stripTags(m[2]);
+    const minimum = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}]/u.test(t) ? 18 : 40;
+    if (t.length > minimum && t.length < 600 && isHighQualityContent(t) && !out.includes(t)) out.push(t);
   }
   return out;
 }
 
-function getLinks(html, base, host) {
-  const clean = contentOnly(html);
+function getLinks(html, base, host, includeNavigation = false) {
+  const clean = includeNavigation ? html : contentOnly(html);
   const out = [];
   const seen = new Set();
   const re = /<a\s[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a>/gi;
@@ -197,7 +200,7 @@ function getLinks(html, base, host) {
     seen.add(abs);
     let internal = false;
     try {
-      internal = new URL(abs).hostname.replace(/^www\./, '') === host;
+      internal = new URL(abs).hostname.replace(/^www\./, '') === host.replace(/^www\./, '');
     } catch {}
     out.push({ url: abs, text: stripTags(m[2]).slice(0, 80), internal });
   }
@@ -230,8 +233,11 @@ export function getImages(html, base) {
     seen.add(abs);
     const altM = tag.match(/\salt=["']([^"']*)["']/i);
     const alt = altM ? altM[1] : '';
-    const isLogo = /logo|brand|icon/i.test(abs + ' ' + alt);
-    const isProduct = /product|app|feature|screen|dashboard|ui|interface/i.test(abs + ' ' + alt);
+    const path = new URL(abs).pathname;
+    const filename = path.split('/').at(-1) || '';
+    const isLogo = /(?:^|[_.-])(?:logo|wordmark|brand[-_]mark)(?:$|[_.-])/i.test(filename) ||
+      /^(?:[\p{L}\p{N} .&’'+-]{1,36}\s+)?(?:logo|wordmark|brand mark)$/iu.test(alt.trim());
+    const isProduct = /(?:^|[\s/_.-])(?:product|feature|screen|dashboard|interface|device)(?:$|[\s/_.-])/i.test(`${path} ${alt}`);
     const isHero = /hero|banner|cover|main/i.test(abs + ' ' + alt);
     const kind = isHero ? 'hero' : isProduct ? 'product' : isLogo ? 'logo' : 'photo';
     const lazy = /loading=["']lazy["']/i.test(tag);
@@ -1155,6 +1161,11 @@ export async function analyzeWebsite(rawUrl) {
 
   // ---------- subpages (browser mode already captured them; document mode validates + fetches)
   const h1of = (px) => (px.headings.find((hh) => hh.level === 1) || {}).text || '';
+  const pageContent = (px) => ({
+    description: cleanExtractedText(px.meta.description || px.meta['og:description'] || '').slice(0, 600),
+    headings: px.headings.slice(0, 24),
+    paragraphs: px.paragraphs.filter(isHighQualityContent).slice(0, 20),
+  });
   const pathOf = (u) => {
     try {
       return new URL(u).pathname || '/';
@@ -1163,7 +1174,7 @@ export async function analyzeWebsite(rawUrl) {
     }
   };
   const pages = [
-    { url: pageDocs[0].finalUrl, path: pathOf(pageDocs[0].finalUrl), title: x.title, h1: h1of(x), words: x.words, status: pageDocs[0].status, loadMs: pageDocs[0].loadMs, images: x.images.length, links: x.links.length },
+    { url: pageDocs[0].finalUrl, path: pathOf(pageDocs[0].finalUrl), title: x.title, h1: h1of(x), words: x.words, status: pageDocs[0].status, loadMs: pageDocs[0].loadMs, images: x.images.length, links: x.links.length, ...pageContent(x) },
   ];
   const subX = [];
 
@@ -1171,7 +1182,7 @@ export async function analyzeWebsite(rawUrl) {
     for (const doc of capture.pages.slice(1)) {
       const px = extractPage(doc.html, doc.finalUrl, host);
       subX.push(px);
-      pages.push({ url: doc.finalUrl, path: pathOf(doc.finalUrl), title: doc.title || px.title, h1: h1of(px), words: px.words, status: doc.status, loadMs: doc.loadMs, images: px.images.length, links: px.links.length, navError: doc.navError });
+      pages.push({ url: doc.finalUrl, path: pathOf(doc.finalUrl), title: doc.title || px.title, h1: h1of(px), words: px.words, status: doc.status, loadMs: doc.loadMs, images: px.images.length, links: px.links.length, navError: doc.navError, ...pageContent(px) });
     }
   } else {
     const skipPath = /login|signin|sign-in|signup|sign-up|auth|cart|checkout|account|unsubscribe/i;
@@ -1190,7 +1201,41 @@ export async function analyzeWebsite(rawUrl) {
       if (r.status !== 'fulfilled') continue;
       const px = extractPage(r.value.html, r.value.finalUrl, host);
       subX.push(px);
-      pages.push({ url: r.value.finalUrl, path: pathOf(r.value.finalUrl), title: px.title, h1: h1of(px), words: px.words, status: r.value.status, loadMs: r.value.ms, images: px.images.length, links: px.links.length });
+      pages.push({ url: r.value.finalUrl, path: pathOf(r.value.finalUrl), title: px.title, h1: h1of(px), words: px.words, status: r.value.status, loadMs: r.value.ms, images: px.images.length, links: px.links.length, ...pageContent(px) });
+    }
+  }
+
+  // Follow evidence-rich links beyond the first browser captures. Bounded
+  // waves let official hubs lead to individual announcements and results.
+  const evidenceLinks = /investor|annual.report|financial.results|press.release|newsroom|our.business|our.story|about|history|milestone|research|programmes?|programs?|services|products?|how.it.works|impact|sustainab|actualit|resultados|historia|rapport/i;
+  const seenEvidence = new Set(pages.map(page => pathOf(page.url).replace(/\/$/, '') || '/'));
+  const scope = pathOf(url).split('/').filter(Boolean)[0];
+  const broad = !scope || /^(corporate|about|about-us|company|en|en-us|fr|es|de|ja)$/i.test(scope);
+  let frontier = pageDocs.map(doc => ({ links: getLinks(doc.html || '', doc.finalUrl, host, true) }));
+  for (const budget of [5, 4, 3]) {
+    const candidates = new Map();
+    for (const page of frontier) for (const link of page.links || []) {
+      if (!link.internal) continue;
+      const path = pathOf(link.url).replace(/\/$/, '') || '/';
+      if (seenEvidence.has(path) || /\.[a-z0-9]{2,5}$/i.test(path) || /login|sign.in|cart|checkout|search|cookie|careers|contact/i.test(path)) continue;
+      if (!broad && !path.split('/').some(part => part === scope || part.startsWith(scope + '-'))) continue;
+      if (!evidenceLinks.test(path)) continue;
+      const financialDisclosure = /(?:quarter|year-ended|fy20\d{2}|annual-results|earnings|revenue|financial-results)/i.test(path + ' ' + link.text);
+      const score = (financialDisclosure ? 12 : /newsroom\/?$|investor.relations\/?$|our.business|history/i.test(path) ? 9 : /press.release\/.+|reports.and.publications/i.test(path) ? 5 : 3) + (scope && path.startsWith('/' + scope + '/') ? 2 : 0);
+      candidates.set(path, { url: link.url, score });
+    }
+    const selected = [...candidates.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, budget);
+    selected.forEach(([path]) => seenEvidence.add(path));
+    frontier = [];
+    const outcomes = await Promise.allSettled(selected.map(([, link]) => secureSubFetch(link.url)));
+    for (const result of outcomes) {
+      if (result.status !== 'fulfilled') continue;
+      const page = result.value;
+      if (!page.ok || new URL(page.finalUrl).hostname.replace(/^www\./, '') !== new URL(url).hostname.replace(/^www\./, '') || detectBotChallenge(page.html, page.status, '')) continue;
+      const data = extractPage(page.html, page.finalUrl, host);
+      if (data.words < 35) continue;
+      frontier.push({ links: getLinks(page.html, page.finalUrl, host, true) });
+      pages.push({ url: page.finalUrl, path: pathOf(page.finalUrl), title: data.title, h1: h1of(data), words: data.words, status: page.status, loadMs: page.ms, images: data.images.length, links: data.links.length, ...pageContent(data) });
     }
   }
 
@@ -1260,7 +1305,7 @@ export async function analyzeWebsite(rawUrl) {
     dataQuality,
     pages,
     headings: x.headings.slice(0, 24),
-    paragraphs: x.paragraphs.slice(0, 6),
+    paragraphs: x.paragraphs.slice(0, 20),
     images: x.images.slice(0, 12),
     buttons: x.buttons || [],
     forms: x.forms || null,
@@ -1311,6 +1356,19 @@ export async function analyzeWebsite(rawUrl) {
   // extract comprehensive visual DNA
   const visualDna = extractVisualDna(x, subX, host, probeBundle);
   analysis.visualDna = visualDna;
+  analysis.siteName = x.meta['og:site_name'] || null;
+  const measuredVisual = probeBundle?.visualDna || {};
+  analysis.brandKit = deriveBrandKit({
+    name: x.meta['og:site_name'] || x.title || host, url,
+    signals: [
+      ...(measuredVisual.brandSignals || []),
+      ...(x.meta['theme-color'] ? [{ value: x.meta['theme-color'], role: 'brand-theme-color', method: 'HTML theme-color', confidence: 0.73, sourceUrl: url }] : []),
+      ...(x.colors || []).slice(0, 8).map(color => ({ value: color.hex, role: 'css-accent', method: 'Extracted stylesheet colour', confidence: 0.42, sourceUrl: url })),
+    ],
+    logoUrl: (x.images || []).find(image => image.isLogo && !image.isHero && !image.isProduct)?.src || null,
+    fonts: [measuredVisual.h1Font, measuredVisual.bodyFont, ...(x.fonts || [])].filter(Boolean),
+    bodyBackground: measuredVisual.bodyBg, bodyText: measuredVisual.bodyColor,
+  });
   const designSystem = generatePresentationDesignSystem(visualDna);
 
   // synthesize authentic 7-pillar Vistara DNA profile
@@ -1372,14 +1430,14 @@ export async function executeOps(supabase, projectId, ops) {
   for (const op of ops) {
     if (op.op === 'noop') continue;
     if (op.op === 'updateSlide') {
-      const { error } = await supabase.from('slides').update(op.fields).eq('id', op.id);
+      const { error } = await supabase.from('slides').update(op.fields).eq('id', op.id).eq('project_id', projectId);
       if (error) throw error;
     } else if (op.op === 'insertSlide') {
       const { id: _omit, ...row } = op.data;
-      const { error } = await supabase.from('slides').insert(row);
+      const { error } = await supabase.from('slides').insert({ ...row, project_id: projectId });
       if (error) throw error;
     } else if (op.op === 'deleteSlide') {
-      const { error } = await supabase.from('slides').delete().eq('id', op.id);
+      const { error } = await supabase.from('slides').delete().eq('id', op.id).eq('project_id', projectId);
       if (error) throw error;
     } else if (op.op === 'updateProject') {
       if (Object.keys(op.fields).length) {
@@ -1388,19 +1446,24 @@ export async function executeOps(supabase, projectId, ops) {
       }
     } else if (op.op === 'reorder') {
       for (const u of op.updates) {
-        const { error } = await supabase.from('slides').update({ sort_order: u.sort_order }).eq('id', u.id);
+        const { error } = await supabase.from('slides').update({ sort_order: u.sort_order }).eq('id', u.id).eq('project_id', projectId);
         if (error) throw error;
       }
     } else if (op.op === 'regenerate') {
       const { data: fresh, error: projectError } = await supabase.from('projects').select('*').eq('id', projectId).single();
       if (projectError) throw projectError;
-      const { error: deleteError } = await supabase.from('slides').delete().eq('project_id', projectId);
-      if (deleteError) throw deleteError;
-      const gen = generateSlides(fresh);
-      const { error: insertError } = await supabase.from('slides').insert(gen);
-      if (insertError) throw insertError;
-      const { error: statusError } = await supabase.from('projects').update({ status: 'generated' }).eq('id', projectId);
-      if (statusError) throw statusError;
+      const { data: intake, error: intakeError } = await supabase.from('project_intake').select('purpose').eq('project_id', projectId).maybeSingle();
+      if (intakeError) throw intakeError;
+      const { getVerifiedClaims } = await import('./claimEngine.js');
+      const { planPresentation, buildSlidesFromClaims, canonicalizePurpose } = await import('./presentationPlanner.js');
+      const claims = await getVerifiedClaims(projectId);
+      if (!claims.length) throw new Error('No verified claims available. Run website research before regenerating.');
+      const purpose = canonicalizePurpose(intake?.purpose || 'general');
+      const subject = { name: fresh.name, description: fresh.analysis?.description || '', orgType: fresh.analysis?.research?.subject?.orgType || 'generic' };
+      const selection = await planPresentation(projectId, subject, claims, purpose, fresh);
+      const gen = await buildSlidesFromClaims(selection, claims, fresh, subject, purpose);
+      const { saveGeneratedDeck } = await import('./deckStore.js');
+      await saveGeneratedDeck(supabase, fresh, gen, purpose);
     }
   }
 }

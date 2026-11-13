@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ChevronLeft, ChevronRight, FileDown, Loader2, Lock, Maximize, Share2, X, PanelLeft } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileDown, FileText, Loader2, Lock, Maximize, Share2, X, PanelLeft } from 'lucide-react';
 import { useProjectDetail } from '../hooks/useProjectDetail';
 import { SlideCanvas, SlideRenderer } from '../components/deck/SlideRenderer';
 import { SpecStage } from '../components/deck/SpecStage';
@@ -13,9 +13,11 @@ import { DEFAULT_THEME } from '../lib/themes';
 export default function Present() {
   const { id = '' } = useParams();
   const [params] = useSearchParams();
+  const navigate = useNavigate();
   const { project, slides: rowSlides, loading, error: err } = useProjectDetail(id);
   const [specDoc, setSpecDoc] = useState<PresentationSpec | null>(null);
-  const [idx, setIdx] = useState(0);
+  const [specReadyFor, setSpecReadyFor] = useState('');
+  const [idx, setIdx] = useState(() => Math.max(0, Math.min(40, Number(params.get('slide')) - 1 || 0)));
   const [hintVisible, setHintVisible] = useState(true);
   const idleIdx = useRef(-1);
   const isPrivate = /private/i.test(err || '');
@@ -47,20 +49,14 @@ export default function Present() {
       .then((row) => { if (alive) setSpecDoc(row.spec); })
       .catch(() => {
         if (alive && rowSlides.length) setSpecDoc(buildSpecFromSlides(project, rowSlides, 'generated'));
-      });
+      }).finally(() => { if (alive) setSpecReadyFor(id); });
     return () => { alive = false; };
   }, [id, loading, project, rowSlides]);
-
-  useEffect(() => {
-    if (loading || !project || specDoc || rowSlides.length === 0) return;
-    // server sync is asynchronous on first load — derive locally the moment rows arrive
-    const t = setTimeout(() => setSpecDoc(buildSpecFromSlides(project, rowSlides, 'generated')), 800);
-    return () => clearTimeout(t);
-  }, [loading, project, specDoc, rowSlides]);
 
   const slides = specDoc && specDoc.slides.length ? getRenderableSlides(specDoc) : rowSlides;
   const [showUI, setShowUI] = useState(true);
   const [showRail, setShowRail] = useState(false);
+  const [showNotes, setShowNotes] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [dim, setDim] = useState({ w: 1280, h: 720 });
@@ -109,9 +105,17 @@ export default function Present() {
 
   const next = useCallback(() => setIdx((i) => Math.min(i + 1, slides.length - 1)), [slides.length]);
   const prev = useCallback(() => setIdx((i) => Math.max(i - 1, 0)), []);
+  const activeIndex = Math.max(0, Math.min(idx, slides.length - 1));
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (document.fullscreenElement) void document.exitFullscreen();
+        else if (showNotes || showRail) { setShowNotes(false); setShowRail(false); }
+        else if (params.get('studio') === '1') navigate(`/project/${id}`);
+        return;
+      }
+      if ((e.target as HTMLElement)?.closest('button,input,textarea,select,[contenteditable]')) return;
       if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); next(); }
       if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prev(); }
       if (e.key === 'f' || e.key === 'F') {
@@ -121,11 +125,11 @@ export default function Present() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [next, prev]);
+  }, [id, navigate, next, params, prev, showNotes, showRail]);
 
   const theme = project?.theme || DEFAULT_THEME;
   const dur = theme.motion === 'snappy' ? 0.3 : theme.motion === 'calm' ? 0.8 : 0.55;
-  const scale = Math.min(dim.w / 1280, dim.h / 720);
+  const scale = Math.min(dim.w / (specDoc?.canvas.width || 1280), dim.h / (specDoc?.canvas.height || 720));
   const darkStage = theme.skin === 'dark';
   const stageBg = darkStage ? '#0B0B10' : '#ECECE5';
   const stageChrome = darkStage;
@@ -154,7 +158,7 @@ export default function Present() {
     );
   }
 
-  if (loading) {
+  if (loading || (project && specReadyFor !== id)) {
     return (
       <div className="min-h-screen bg-[#ECECE5] text-fog flex items-center justify-center gap-3">
         <Loader2 className="animate-spin" size={18} /> Preparing the stage…
@@ -181,20 +185,20 @@ export default function Present() {
   }
 
   return (
-    <div className="fixed inset-0 overflow-hidden select-none" style={{ background: stageBg }}>
+    <div className="fixed inset-0 overflow-hidden select-none" style={{ background: stageBg }} onPointerDown={poke}>
       {/* stage */}
       <div className="absolute inset-0 flex items-center justify-center">
         <AnimatePresence mode="wait">
           <motion.div
-            key={specDoc.slides[idx]?.id || idx}
-            initial={{ opacity: 0, scale: theme.motion === 'snappy' ? 0.99 : 0.985 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.008 }}
+            key={specDoc.slides[activeIndex]?.id || activeIndex}
+            initial={{ opacity: 0, scale: scale * (theme.motion === 'snappy' ? 0.99 : 0.985) }}
+            animate={{ opacity: 1, scale }}
+            exit={{ opacity: 0, scale: scale * 1.008 }}
             transition={{ duration: dur, ease: [0.22, 1, 0.36, 1] }}
-            style={{ width: specDoc.canvas.width, height: specDoc.canvas.height, transform: `scale(${scale})` }}
+            style={{ width: specDoc.canvas.width, height: specDoc.canvas.height }}
             className="shrink-0 overflow-hidden rounded-[16px]"
           >
-            <SpecStage spec={specDoc} index={idx} animate interactive />
+            <SpecStage spec={specDoc} index={activeIndex} animate interactive />
           </motion.div>
         </AnimatePresence>
       </div>
@@ -215,7 +219,7 @@ export default function Present() {
           <path d="M32 13 Q34.6 28.4 46 31.5 Q34.6 34.6 32 50 Q29.4 34.6 18 31.5 Q29.4 28.4 32 13 Z" fill="#F4F4EF" />
           <circle cx="32" cy="32" r="2.4" fill="#D9F26B" />
         </svg>
-        <span className="text-[11px] font-medium text-ink/85">{project.name}</span>
+        <span className="text-[11px] font-medium text-ink/85">{specDoc.name}</span>
         <span className="text-[9px] font-mono text-fog">·</span>
         <span className="text-[9.5px] font-mono text-fog uppercase tracking-[0.2em]">vistara present</span>
       </motion.div>
@@ -233,13 +237,14 @@ export default function Present() {
           </motion.div>
         )}
       </AnimatePresence>
+      {showNotes && <aside aria-label="Presenter notes" className="absolute right-4 bottom-20 z-40 max-w-sm max-h-[50vh] overflow-auto select-text bg-white text-ink border border-black/10 rounded-2xl p-5 shadow-xl"><div className="flex items-center justify-between gap-4 mb-3"><strong>Speaker notes</strong><button aria-label="Close speaker notes" onClick={() => setShowNotes(false)}><X size={16} /></button></div><p className="whitespace-pre-wrap text-sm">{specDoc.slides[activeIndex]?.notes || 'No notes for this slide.'}</p></aside>}
 
       {/* progress */}
       <div className="absolute top-0 left-0 right-0 h-[3px] z-40" style={{ background: stageChrome ? 'rgba(255,255,255,0.06)' : 'rgba(23,23,15,0.08)' }}>
         <motion.div
           className="h-full"
           style={{ background: `linear-gradient(90deg, ${theme.accent}, ${theme.accent2})` }}
-          animate={{ width: `${((idx + 1) / slides.length) * 100}%` }}
+          animate={{ width: `${((activeIndex + 1) / slides.length) * 100}%` }}
           transition={{ duration: 0.4 }}
         />
       </div>
@@ -251,7 +256,7 @@ export default function Present() {
         className="absolute bottom-5 left-1/2 -translate-x-1/2 z-40 rounded-full px-2 py-1.5 flex items-center gap-1 glass-deep"
         style={{ pointerEvents: showUI ? 'auto' : 'none' }}
       >
-        <Link to={`/project/${project.id}`} className="p-2.5 rounded-full text-fog hover:text-ink hover:bg-black/[0.05] transition-colors" title="Back to studio">
+        <Link to={`/project/${project.id}`} aria-label="Back to studio" className="p-2.5 rounded-full text-fog hover:text-ink hover:bg-black/[0.05] transition-colors" title="Back to studio">
           <X size={15} />
         </Link>
         <span className="w-px h-4 bg-black/10" />
@@ -262,11 +267,12 @@ export default function Present() {
         >
           <PanelLeft size={15} />
         </button>
+        <button type="button" aria-label="Speaker notes" aria-pressed={showNotes} onClick={() => setShowNotes(value => !value)} className={`p-2.5 rounded-full ${showNotes ? 'chip-lime' : 'text-fog hover:text-ink hover:bg-black/[0.05]'}`}><FileText size={15} /></button>
         <button onClick={prev} className="p-2.5 rounded-full text-fog hover:text-ink hover:bg-black/[0.05] transition-colors disabled:opacity-30" disabled={idx === 0}>
           <ChevronLeft size={16} />
         </button>
         <span className="text-[11px] font-mono text-fog px-2 min-w-[64px] text-center">
-          {String(idx + 1).padStart(2, '0')} / {String(slides.length).padStart(2, '0')}
+          {String(activeIndex + 1).padStart(2, '0')} / {String(slides.length).padStart(2, '0')}
         </span>
         <button onClick={next} className="p-2.5 rounded-full text-fog hover:text-ink hover:bg-black/[0.05] transition-colors disabled:opacity-30" disabled={idx === slides.length - 1}>
           <ChevronRight size={16} />

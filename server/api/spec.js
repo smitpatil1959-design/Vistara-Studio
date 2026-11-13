@@ -2,6 +2,7 @@ import supabase from './db-client.js';
 import { buildSpecFromSlides, normalizePresentation, validatePresentation } from '../spec/index.js';
 import { defaultMotionSpec, defaultThemeSpec } from '../spec/index.js';
 import { ensureDeckAccess, requireProjectOwner } from '../visibility.js';
+import { saveDeck } from '../deckStore.js';
 
 const cors = (res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -43,25 +44,13 @@ async function projectSpecToRows(spec, projectId) {
       theme_override: null,
     };
   });
-  const { data: existing, error: existingError } = await supabase.from('slides').select('id').eq('project_id', projectId);
+  const { data: existing, error: existingError } = await supabase.from('slides').select('id, claim_ids, evidence_ids, source_urls').eq('project_id', projectId);
   if (existingError) throw existingError;
-  const keep = new Set(rows.map((r) => r.id));
-  const doomed = (existing || []).map((r) => r.id).filter((id) => !keep.has(id));
-  if (doomed.length) {
-    const { error } = await supabase.from('slides').delete().in('id', doomed);
-    if (error) throw error;
-  }
-  for (const row of rows) {
-    const known = (existing || []).some((r) => r.id === row.id);
-    if (known) {
-      const { id, ...fields } = row;
-      const { error } = await supabase.from('slides').update(fields).eq('id', id);
-      if (error) throw error;
-    } else {
-      const { error } = await supabase.from('slides').insert(row);
-      if (error) throw error;
-    }
-  }
+  return rows.map((row, i) => {
+    const old = (existing || []).find(s => s.id === row.id);
+    const sources = spec.slides[i].sources || [];
+    return { ...row, claim_ids: [...new Set([...(old?.claim_ids || []), ...sources.flatMap(source => /^[0-9a-f-]{36}$/i.test(source.claimId || '') ? [source.claimId] : [])])], evidence_ids: old?.evidence_ids || [], source_urls: [...new Set([...(old?.source_urls || []), ...sources.map(source => source.url)])] };
+  });
 }
 
 async function loadSpecRow(projectId) {
@@ -123,22 +112,25 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'PUT') {
-      const { projectId, spec } = req.body || {};
+      const { projectId, spec, expectedVersion } = req.body || {};
       if (!projectId || !spec) return res.status(400).json({ error: 'projectId and spec required' });
+      if (expectedVersion !== undefined && (!Number.isInteger(expectedVersion) || expectedVersion < 0)) return res.status(400).json({ error: 'Expected version must be a nonnegative integer.' });
       if (!(await requireProjectOwner(supabase, req, projectId))) return res.status(403).json({ error: 'Only the project owner can save decks.' });
+      if (!Array.isArray(spec.slides) || !spec.slides.length || spec.slides.length > 200) return res.status(422).json({ valid: false, errors: ['A deck must contain between 1 and 200 slides.'] });
 
       const normalized = normalizePresentation(spec, { theme: defaultThemeSpec(), motion: defaultMotionSpec() });
       const result = validatePresentation(normalized);
       if (!result.valid) return res.status(422).json(result);
-      const version = await upsertSpec(projectId, normalized);
-      // the schema is canonical — legacy slide rows become a projection of it
-      await projectSpecToRows(normalized, projectId);
+      const rows = await projectSpecToRows(normalized, projectId);
+      const version = await saveDeck(supabase, projectId, rows, normalized, false, expectedVersion ?? null);
       return res.status(200).json({ valid: true, errors: [], version });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
     console.error('spec api error:', err);
+    if (err?.code === '40001') return res.status(409).json({ error: 'This presentation changed in another tab. Reload before saving to avoid overwriting newer work.', code: 'VERSION_CONFLICT' });
+    if (['PGRST202', '42883'].includes(err?.code)) return res.status(503).json({ error: 'Apply the latest Supabase migration to enable safe deck saves.', code: 'DATABASE_UNINITIALIZED' });
     return res.status(500).json({ error: err.message || 'Server error' });
   }
 }

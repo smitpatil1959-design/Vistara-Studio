@@ -2,11 +2,14 @@ import { useMemo } from 'react';
 import type { CardContent } from '../../../deck-spec';
 import { fontFamily, useRenderCtx } from './context';
 import { resolveIcon } from './icons';
+import { tint, type ElementStyle } from '../../../deck-spec';
 
 export function CardElement({ content, style }: { content: CardContent; style?: Record<string, unknown> }) {
   const { theme } = useRenderCtx();
   const { colors, radius, shadows, typography, effects } = theme;
-  const s = (style || {}) as { backgroundColor?: string; borderColor?: string; radius?: number; shadow?: string };
+  const s = (style || {}) as ElementStyle;
+  const textColor = s.color || colors.text;
+  const small = Number(s.fontSize || 16) <= 14;
   const Icon = useMemo(() => (content.icon ? resolveIcon(content.icon) : null), [content.icon]);
   const sheetRadius = s.radius ?? radius.md;
 
@@ -15,6 +18,7 @@ export function CardElement({ content, style }: { content: CardContent; style?: 
       className="p-5 overflow-hidden flex flex-col justify-center"
       style={{
         background: s.backgroundColor || (effects.glass ? `${colors.surface}CC` : colors.surface),
+        height: '100%', minHeight: 0, padding: s.padding ? `${s.padding[0]}px ${s.padding[1]}px ${s.padding[2]}px ${s.padding[3]}px` : small ? 16 : 24,
         backdropFilter: effects.glass ? 'blur(12px)' : undefined,
         border: `1px solid ${s.borderColor || colors.line}`,
         borderRadius: sheetRadius,
@@ -38,10 +42,7 @@ export function CardElement({ content, style }: { content: CardContent; style?: 
               fontSize: 30,
               fontWeight: 650,
               letterSpacing: '-0.03em',
-              background: `linear-gradient(120deg, ${colors.text} 30%, ${colors.accent})`,
-              WebkitBackgroundClip: 'text',
-              backgroundClip: 'text',
-              color: 'transparent',
+              color: textColor,
             }}
           >
             {content.metric}
@@ -50,12 +51,12 @@ export function CardElement({ content, style }: { content: CardContent; style?: 
       </div>
       <div
         className={`line-clamp-2 ${Icon || content.index != null || content.metric ? 'mt-2.5' : ''}`}
-        style={{ fontFamily: fontFamily(typography.headingFont), fontSize: 16, fontWeight: 600, lineHeight: 1.3, color: colors.text }}
+        style={{ fontFamily: fontFamily(s.fontFamily || typography.headingFont), fontSize: s.fontSize || 18, fontWeight: s.fontWeight || 600, lineHeight: s.lineHeight || 1.3, color: textColor }}
       >
         {content.title}
       </div>
       {content.body && (
-        <p className="mt-1.5 line-clamp-3" style={{ fontFamily: fontFamily(typography.bodyFont), fontSize: 13, lineHeight: 1.55, color: colors.muted }}>
+        <p className="mt-1.5 whitespace-pre-wrap" style={{ fontFamily: fontFamily(s.fontFamily || typography.bodyFont), fontSize: typeof s.bodyFontSize === 'number' ? s.bodyFontSize : small ? 12 : 14, lineHeight: 1.4, color: s.color && s.backgroundColor ? tint(s.color, s.backgroundColor, 0.2) : colors.muted }}>
           {content.body}
         </p>
       )}

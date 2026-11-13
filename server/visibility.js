@@ -4,6 +4,7 @@
  * write visibility.
  */
 
+import { requestToken } from './assetAccess.js';
 export const VISIBILITIES = ['public', 'unlisted', 'private'];
 export const DEFAULT_VISIBILITY = 'unlisted';
 
@@ -11,11 +12,12 @@ export const DEFAULT_VISIBILITY = 'unlisted';
 export async function getVisibility(supabase, projectId) {
   try {
     const { data, error } = await supabase.from('project_visibility').select('visibility').eq('project_id', projectId).maybeSingle();
-    if (error) return DEFAULT_VISIBILITY;
+    if (error) throw error;
     const v = data?.visibility;
     return VISIBILITIES.includes(v) ? v : DEFAULT_VISIBILITY;
-  } catch {
-    return DEFAULT_VISIBILITY;
+  } catch (error) {
+    console.error('[visibility] Could not verify sharing permissions:', error.message);
+    throw error;
   }
 }
 
@@ -29,7 +31,7 @@ export async function getVisibility(supabase, projectId) {
 export async function ensureDeckAccess(supabase, req, projectId) {
   const visibility = await getVisibility(supabase, projectId);
   if (visibility === 'private') {
-    const token = (req.headers.authorization || '').replace(/^Bearer /i, '');
+    const token = requestToken(req);
     if (!token) return { allowed: false, reason: 'auth-required', visibility };
     const { data, error } = await supabase.auth.getUser(token).catch(() => ({ data: null, error: new Error('auth') }));
     if (error || !data?.user) return { allowed: false, reason: 'auth-required', visibility };
@@ -41,7 +43,7 @@ export async function ensureDeckAccess(supabase, req, projectId) {
 
 /** Mutation-level gate: a valid session token must be presented for writes. */
 export async function requireSignedIn(supabase, req) {
-  const token = (req.headers.authorization || '').replace(/^Bearer /i, '');
+  const token = requestToken(req);
   if (!token) return null;
   try {
     const { data, error } = await supabase.auth.getUser(token);

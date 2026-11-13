@@ -24,6 +24,7 @@ export default function InteractiveCanvas({ spec, slideIndex, selectedId, onSele
   const [selRect, setSelRect] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [drag, setDrag] = useState<{ id: string; startX: number; startY: number; stageX: number; stageY: number; mode: 'move' | 'resize'; startW: number; startH: number } | null>(null);
   const [editText, setEditText] = useState<{ id: string; rect: { x: number; y: number; w: number } } | null>(null);
+  const dragChanged = useRef(false);
 
   const slide = spec.slides[slideIndex];
 
@@ -87,6 +88,7 @@ export default function InteractiveCanvas({ spec, slideIndex, selectedId, onSele
     }
     // begin drag — move or resize handled by overlay handles; body drag = move
     if (!selectedEl) return;
+    dragChanged.current = false;
     live.current = true;
     const box = hit.getBoundingClientRect();
     const stage = stagePoint(box.left, box.top);
@@ -100,6 +102,8 @@ export default function InteractiveCanvas({ spec, slideIndex, selectedId, onSele
     if (!drag || !slide) return;
     const dx = (e.clientX - drag.startX) / scale;
     const dy = (e.clientY - drag.startY) / scale;
+    if (!dragChanged.current && Math.hypot(dx, dy) < 2) return;
+    dragChanged.current = true;
     const next = structuredClone(spec);
     const target = next.slides[slideIndex].elements.find((el) => el.id === drag.id)
       || next.slides[slideIndex].elements.flatMap((el) => (el.content.kind === 'group' ? el.content.children : [])).find((el) => el.id === drag.id);
@@ -122,6 +126,11 @@ export default function InteractiveCanvas({ spec, slideIndex, selectedId, onSele
 
   const onPointerUp = () => {
     if (!drag || !slide) return;
+    if (!dragChanged.current) {
+      setDrag(null);
+      live.current = false;
+      return;
+    }
     const committed = structuredClone(spec);
     const el = committed.slides[slideIndex].elements.find((x) => x.id === drag.id)
       || committed.slides[slideIndex].elements.flatMap((x) => (x.content.kind === 'group' ? x.content.children : [])).find((x) => x.id === drag.id);
@@ -134,6 +143,7 @@ export default function InteractiveCanvas({ spec, slideIndex, selectedId, onSele
       onCommitChange(committed, drag.mode === 'move' ? 'Move element' : 'Resize element');
     }
     setDrag(null);
+    dragChanged.current = false;
     live.current = false;
   };
 

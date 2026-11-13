@@ -1,1 +1,1 @@
-export { default, maxDuration } from '../auth-signup.js';
+export { default, maxDuration } from '../../server/api/auth-signup.js';

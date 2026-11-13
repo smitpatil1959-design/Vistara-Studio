@@ -1,6 +1,7 @@
 import supabase from './db-client.js';
 import { ensureDeckAccess, requireProjectOwner, requireSignedIn } from '../visibility.js';
 import { validateTarget, CrawlBlockedError } from '../security.js';
+import { syncProjectTheme } from '../specSync.js';
 
 async function logEvent(project_id, kind) {
   try {
@@ -71,7 +72,10 @@ export default async function handler(req, res) {
     }
 
     if (req.method === 'POST') {
+      const user = await requireSignedIn(supabase, req);
+      if (!user) return res.status(401).json({ error: 'Sign in to create studies.' });
       const { url, name, theme, purpose, designPrompt } = req.body || {};
+      if (designPrompt !== undefined && typeof designPrompt !== 'string') return res.status(400).json({ error: 'Design direction must be text.' });
       if (!url || !String(url).trim()) return res.status(400).json({ error: 'A website URL is required.' });
       let clean = String(url).trim();
       if (!/^https?:\/\//i.test(clean)) clean = 'https://' + clean;
@@ -110,11 +114,9 @@ export default async function handler(req, res) {
       ]);
       const cleanPurpose = PURPOSES.has(purpose) ? purpose : 'general';
 
-      const user = await requireSignedIn(supabase, req);
-      if (!user) return res.status(401).json({ error: 'Sign in to create studies.' });
       const insertPayload = {
         url: clean,
-        name: name || host,
+        name: typeof name === 'string' && name.trim() ? name.trim().slice(0, 200) : host,
         status: 'queued',
         theme: theme || null,
         user_id: user.id,
@@ -154,14 +156,23 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: 'id required' });
       if (!(await requireProjectOwner(supabase, req, id))) return res.status(403).json({ error: 'Only the project owner can edit studies.' });
       const fields = {};
+      if (name !== undefined && (typeof name !== 'string' || !name.trim())) return res.status(400).json({ error: 'A study name is required.' });
+      if (theme !== undefined && (theme === null || typeof theme !== 'object' || Array.isArray(theme))) return res.status(400).json({ error: 'Theme must be an object.' });
+      if (url !== undefined) {
+        if (typeof url !== 'string' || !url.trim()) return res.status(400).json({ error: 'A website URL is required.' });
+        const clean = /^https?:\/\//i.test(url.trim()) ? url.trim() : `https://${url.trim()}`;
+        try { await validateTarget(clean); }
+        catch (error) { return res.status(400).json({ error: error instanceof CrawlBlockedError ? error.toStructured().message : 'Website address could not be resolved.' }); }
+        fields.url = clean;
+      }
       if (name !== undefined) fields.name = name;
-      if (url !== undefined) fields.url = url;
       if (status !== undefined) fields.status = status;
       if (analysis !== undefined) fields.analysis = analysis;
       if (audit !== undefined) fields.audit = audit;
       if (understanding !== undefined) fields.understanding = understanding;
       if (dna !== undefined) fields.dna = dna;
       if (theme !== undefined) fields.theme = theme;
+      fields.updated_at = new Date().toISOString();
 
       const { data, error } = await supabase.from('projects').update(fields).eq('id', id).select().single();
       if (error) {
@@ -169,6 +180,7 @@ export default async function handler(req, res) {
         return res.status(500).json({ error: error.message || 'Failed to update study' });
       }
       void logEvent(id, 'updated');
+      if (theme !== undefined) await syncProjectTheme(id, theme);
       return res.status(200).json(data);
     }
 
@@ -176,20 +188,10 @@ export default async function handler(req, res) {
       const { id } = req.body || {};
       if (!id) return res.status(400).json({ error: 'id required' });
       if (!(await requireProjectOwner(supabase, req, id))) return res.status(403).json({ error: 'Only the project owner can delete studies.' });
-      const cleanupResults = await Promise.all([
-        supabase.from('chat_messages').delete().eq('project_id', id),
-        supabase.from('slides').delete().eq('project_id', id),
-        supabase.from('project_events').delete().eq('project_id', id),
-        supabase.from('project_intake').delete().eq('project_id', id),
-        supabase.from('project_specs').delete().eq('project_id', id),
-      ]);
-      const cleanupError = cleanupResults.find((result) => result.error)?.error;
-      if (cleanupError) return res.status(500).json({ error: 'Could not fully clean up this study.', code: 'PROJECT_CLEANUP_FAILED' });
-      // purge asset library
+      // Keep the database intact until storage cleanup succeeds. The final
+      // project delete cascades all child tables in one database transaction.
       const { data: rows, error: assetReadError } = await supabase.from('assets').select('path, thumb_path').eq('project_id', id);
       if (assetReadError) return res.status(500).json({ error: 'Could not load study assets for deletion.', code: 'ASSET_READ_FAILED' });
-      const { error: assetDeleteError } = await supabase.from('assets').delete().eq('project_id', id);
-      if (assetDeleteError) return res.status(500).json({ error: 'Could not delete study assets.', code: 'ASSET_DELETE_FAILED' });
       if (rows && rows.length) {
         const files = rows.flatMap((r) => [r.path, r.thumb_path].filter(Boolean));
         if (files.length) {

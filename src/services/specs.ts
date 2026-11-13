@@ -1,4 +1,5 @@
 import type { PresentationSpec } from '../deck-spec';
+import { normalizePresentation, defaultThemeSpec, defaultMotionSpec } from '../deck-spec';
 import { request } from './http';
 
 export interface SpecRow {
@@ -14,12 +15,13 @@ export interface SpecValidation {
   version?: number;
 }
 
-export function getSpec(projectId: string): Promise<SpecRow> {
-  return request<SpecRow>(`/api/spec?projectId=${encodeURIComponent(projectId)}`);
+export async function getSpec(projectId: string): Promise<SpecRow> {
+  const row = await request<SpecRow>(`/api/spec?projectId=${encodeURIComponent(projectId)}`);
+  return { ...row, spec: normalizePresentation(row.spec, { theme: defaultThemeSpec(), motion: defaultMotionSpec() }) };
 }
 
-export function putSpec(projectId: string, spec: PresentationSpec): Promise<SpecValidation> {
-  return request<SpecValidation>('/api/spec', { method: 'PUT', body: JSON.stringify({ projectId, spec }) });
+export function putSpec(projectId: string, spec: PresentationSpec, expectedVersion?: number): Promise<SpecValidation> {
+  return request<SpecValidation>('/api/spec', { method: 'PUT', body: JSON.stringify({ projectId, spec, expectedVersion }) });
 }
 
 export function validateSpec(spec: unknown): Promise<SpecValidation> {

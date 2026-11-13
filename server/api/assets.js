@@ -1,7 +1,8 @@
 import supabase from './db-client.js';
 import { ASSET_BUCKET, ASSET_MAX_INPUT_BYTES, optimizeImage, assetPath } from '../assets.js';
 import { enforceRateLimit, sniffImageMime } from '../ratelimit.js';
-import { ensureDeckAccess, requireProjectOwner, requireSignedIn } from '../visibility.js';
+import { ensureDeckAccess, requireProjectOwner } from '../visibility.js';
+import { assetUrl } from '../assetAccess.js';
 
 export const maxDuration = 30;
 
@@ -50,18 +51,19 @@ export default async function handler(req, res) {
 
       const opt = await optimizeImage(raw);
       const params = { contentType: opt.mime || cleanMime, upsert: true };
-      const mainPath = assetPath(projectId, name || 'image', 'main', sniffed);
+      const mainPath = assetPath(projectId, name || 'image', 'main', opt.mime || cleanMime);
       const { error: upErr } = await supabase.storage.from(ASSET_BUCKET).upload(mainPath, opt.main, params);
       if (upErr) throw upErr;
 
       let thumbPath = null;
       if (opt.thumb) {
         thumbPath = assetPath(projectId, name || 'image', 'thumb');
-        await supabase.storage.from(ASSET_BUCKET).upload(thumbPath, opt.thumb, params);
+        const { error: thumbError } = await supabase.storage.from(ASSET_BUCKET).upload(thumbPath, opt.thumb, { contentType: 'image/jpeg', upsert: true });
+        if (thumbError) {
+          await supabase.storage.from(ASSET_BUCKET).remove([mainPath]);
+          throw thumbError;
+        }
       }
-
-      const { data: pub } = supabase.storage.from(ASSET_BUCKET).getPublicUrl(mainPath);
-      const { data: pubT } = thumbPath ? supabase.storage.from(ASSET_BUCKET).getPublicUrl(thumbPath) : { data: { publicUrl: null } };
 
       const { data: row, error: rowErr } = await supabase
         .from('assets')
@@ -71,8 +73,8 @@ export default async function handler(req, res) {
           name: String(name || 'image').slice(0, 120),
           path: mainPath,
           thumb_path: thumbPath,
-          url: pub.publicUrl,
-          thumb_url: pubT.publicUrl,
+          url: assetUrl(projectId, mainPath),
+          thumb_url: thumbPath ? assetUrl(projectId, thumbPath) : null,
           width: opt.width,
           height: opt.height,
           bytes: opt.main.length,
@@ -81,7 +83,10 @@ export default async function handler(req, res) {
         })
         .select()
         .single();
-      if (rowErr) throw rowErr;
+      if (rowErr) {
+        await supabase.storage.from(ASSET_BUCKET).remove([mainPath, thumbPath].filter(Boolean));
+        throw rowErr;
+      }
       return res.status(201).json(row);
     }
 
@@ -106,9 +111,11 @@ export default async function handler(req, res) {
       const buf = Buffer.from(await file.arrayBuffer());
       const opt = await optimizeImage(buf, { crop });
 
-      await supabase.storage.from(ASSET_BUCKET).upload(asset.path, opt.main, { contentType: opt.mime || asset.mime || 'image/jpeg', upsert: true });
+      const { error: uploadError } = await supabase.storage.from(ASSET_BUCKET).upload(asset.path, opt.main, { contentType: opt.mime || asset.mime || 'image/jpeg', upsert: true });
+      if (uploadError) throw uploadError;
       if (asset.thumb_path && opt.thumb) {
-        await supabase.storage.from(ASSET_BUCKET).upload(asset.thumb_path, opt.thumb, { contentType: 'image/jpeg', upsert: true });
+        const { error: thumbError } = await supabase.storage.from(ASSET_BUCKET).upload(asset.thumb_path, opt.thumb, { contentType: 'image/jpeg', upsert: true });
+        if (thumbError) throw thumbError;
       }
       const stamp = `?t=${Date.now()}`;
       const { data: updated, error } = await supabase
@@ -127,7 +134,8 @@ export default async function handler(req, res) {
       const { data: asset } = await supabase.from('assets').select('*').eq('id', id).single();
       if (asset && !(await requireProjectOwner(supabase, req, asset.project_id))) return res.status(403).json({ error: 'Only the project owner can delete assets.' });
       if (asset) {
-        await supabase.storage.from(ASSET_BUCKET).remove([asset.path, asset.thumb_path].filter(Boolean));
+        const { error: storageError } = await supabase.storage.from(ASSET_BUCKET).remove([asset.path, asset.thumb_path].filter(Boolean));
+        if (storageError) throw storageError;
         const { error } = await supabase.from('assets').delete().eq('id', id);
         if (error) throw error;
       }

@@ -5,10 +5,10 @@ import { Element } from './index';
 /** Groups render children flow-stacked; depth is capped so malformed nesting can't recurse forever. */
 export function GroupElement({ content, depth = 0 }: { content: GroupContent; depth?: number }) {
   const { theme } = useRenderCtx();
-  const children = Array.isArray(content.children) ? content.children.slice(0, 24) : [];
+  const children = Array.isArray(content.children) ? content.children : [];
   if (depth > 6 || children.length === 0) return null;
   return (
-    <div className="flex flex-col" style={{ gap: theme.spacing.unit * 2 }}>
+    <div className={children.every(child => child.position.mode === 'absolute') ? 'relative w-full h-full' : 'flex flex-col'} style={{ gap: theme.spacing.unit * 2 }}>
       {children.map((child: SlideElement) => (
         <Element key={child.id} element={child} depth={depth + 1} />
       ))}

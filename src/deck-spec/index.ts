@@ -4,3 +4,8 @@ export * from './defaults';
 export * from './fromSlides';
 export * from './motionPresets';
 export * from './ops';
+export * from './brand';
+export * from './design';
+export * from './geometry';
+export * from './evidence';
+export * from './proposals';

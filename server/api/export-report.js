@@ -36,7 +36,7 @@ export default async function handler(req, res) {
       spec = buildSpecFromSlides(project, slides, 'generated');
     }
 
-    const report = await buildReadinessReport(spec, { format: ['web', 'pdf', 'pptx'].includes(format) ? format : 'pptx', probeAssets: true });
+    const report = await buildReadinessReport(spec, { format: ['web', 'pdf', 'pptx'].includes(format) ? format : 'pptx', probeAssets: true, projectId });
     return res.status(200).json(report);
   } catch (err) {
     console.error('export-report error:', err);

@@ -1,5 +1,6 @@
 import supabase from './db-client.js';
 import { ensureDeckAccess, requireProjectOwner } from '../visibility.js';
+import { syncProjectTheme } from '../specSync.js';
 
 const cors = (res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -29,10 +30,11 @@ export default async function handler(req, res) {
     if (req.method === 'PUT') {
       if (!(await requireProjectOwner(supabase, req, projectId))) return res.status(403).json({ error: 'Only the project owner can update the theme.' });
       const theme = req.body?.theme;
-      if (!theme) return res.status(400).json({ error: 'theme object required' });
+      if (!theme || typeof theme !== 'object' || Array.isArray(theme)) return res.status(400).json({ error: 'theme object required' });
 
       const { data, error } = await supabase.from('projects').update({ theme }).eq('id', projectId).select('theme').single();
       if (error) throw error;
+      await syncProjectTheme(projectId, data?.theme || theme);
       return res.status(200).json(data?.theme || theme);
     }
 

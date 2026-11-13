@@ -596,13 +596,13 @@ export async function fetchValidated(rawUrl, limits = CRAWL_LIMITS) {
 
   for (let hop = 0; hop <= limits.redirectLimit; hop++) {
     const { url } = await validateTarget(current);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), limits.hopTimeoutMs);
+    // Keep the deadline active through body streaming as well as headers.
+    const signal = AbortSignal.timeout(limits.hopTimeoutMs);
     let res;
     try {
       res = await fetch(url, {
         redirect: 'manual',
-        signal: controller.signal,
+        signal,
         headers: UA_HEADERS,
         dispatcher: safeDispatcher,
       });
@@ -613,8 +613,6 @@ export async function fetchValidated(rawUrl, limits = CRAWL_LIMITS) {
         throw new CrawlBlockedError('blocked-host');
       }
       throw new CrawlBlockedError(e && e.name === 'AbortError' ? 'timeout' : 'unreachable');
-    } finally {
-      clearTimeout(timer);
     }
 
     const location = res.headers.get('location');

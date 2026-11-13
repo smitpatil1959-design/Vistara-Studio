@@ -72,7 +72,7 @@ function sourceConfidence(sourceType) {
  * @param {Array} pages - Crawled pages from analysis.pages
  * @returns {Promise<{ sourcesCreated: number, evidenceCreated: number, errors: string[] }>}
  */
-export async function extractEvidenceFromCrawl(projectId, analysis, pages) {
+export async function extractEvidenceFromCrawl(projectId, analysis, pages, sessionId) {
   const results = { sourcesCreated: 0, evidenceCreated: 0, errors: [] };
 
   if (!pages) return results;
@@ -82,7 +82,7 @@ export async function extractEvidenceFromCrawl(projectId, analysis, pages) {
     const mainSource = await createOrGetSource(projectId, mainUrl, 'official', {
       title: safeStr(analysis.title),
       domain: analysis.host || '',
-      hierarchyScore: SOURCE_SCORES.official,
+      hierarchyScore: SOURCE_SCORES.official, sessionId,
     });
 
     if (!mainSource) {
@@ -90,6 +90,7 @@ export async function extractEvidenceFromCrawl(projectId, analysis, pages) {
       return results;
     }
     results.sourcesCreated++;
+    const sourceIds = new Set([mainSource.id]);
 
     const evidenceItems = [];
 
@@ -175,11 +176,18 @@ export async function extractEvidenceFromCrawl(projectId, analysis, pages) {
       const pageSource = await createOrGetSource(projectId, pageUrl, 'official', {
         title: safeStr(page?.title),
         domain: mainSource.domain || '',
-        hierarchyScore: SOURCE_SCORES.official,
+        hierarchyScore: SOURCE_SCORES.official, sessionId,
       });
       if (!pageSource) continue;
+      sourceIds.add(pageSource.id);
 
       const pageClaimType = classifyPageByUrl(page?.url, page?.title, page?.h1);
+      for (const candidate of [page.description, ...(page.paragraphs || []), ...(page.headings || []).map(heading => heading?.text)].slice(0, 45)) {
+        const text = cleanExtractedText(safeStr(candidate)).slice(0, 600);
+        if (!isHighQualityContent(text)) continue;
+        evidenceItems.push({ sourceId: pageSource.id, claimType: classifyParagraphContent(text),
+          pageTitle: safeStr(page.title), section: 'Page Content', extractedText: text, confidence: 0.8 });
+      }
 
       if (page?.h1) {
         const h1 = cleanExtractedText(safeStr(page.h1));
@@ -210,58 +218,40 @@ export async function extractEvidenceFromCrawl(projectId, analysis, pages) {
       }
     }
 
-    // Store all evidence
+    results.sourcesCreated = sourceIds.size;
+    // Store each source passage once, including when the homepage is in pages.
+    const seenPassages = new Set();
+    const rows = [];
     for (const item of evidenceItems) {
       if (!item.extractedText || !isHighQualityContent(item.extractedText)) continue;
-      try {
-        const { error } = await supabase.from('evidence').insert({
+      const passageKey = `${item.sourceId}:${item.extractedText.toLowerCase().replace(/\s+/g, ' ').trim()}`;
+      if (seenPassages.has(passageKey)) continue;
+      seenPassages.add(passageKey);
+      rows.push({
           project_id: projectId,
+          research_session_id: sessionId,
           source_id: item.sourceId,
           claim_type: safeClaimType(item.claimType),
           page_title: item.pageTitle || null,
           section: item.section || null,
           extracted_text: item.extractedText,
           confidence: item.confidence ?? 0.8,
-        });
+      });
+    }
+    for (let offset = 0; offset < rows.length; offset += 40) {
+      const batch = rows.slice(offset, offset + 40);
+      try {
+        const { error } = await supabase.from('evidence').insert(batch);
         if (error) {
           results.errors.push(`Evidence insert: ${error.message}`);
         } else {
-          results.evidenceCreated++;
+          results.evidenceCreated += batch.length;
         }
       } catch (err) {
         results.errors.push(`Evidence creation: ${err.message}`);
       }
     }
 
-    // Update research session record with crawl stats
-    try {
-      const { data: existing } = await supabase
-        .from('research_sessions')
-        .select('id')
-        .eq('project_id', projectId)
-        .maybeSingle();
-
-      if (existing) {
-        const { error } = await supabase.from('research_sessions').update({
-          crawl_date: new Date().toISOString(),
-          sources_count: results.sourcesCreated,
-          evidence_count: results.evidenceCreated,
-        }).eq('project_id', projectId);
-        if (error) console.warn('[evidence] research_session update:', error.message);
-      } else {
-        const { error } = await supabase.from('research_sessions').insert({
-          project_id: projectId,
-          research_type: 'initial',
-          status: 'crawling',
-          crawl_date: new Date().toISOString(),
-          sources_count: results.sourcesCreated,
-          evidence_count: results.evidenceCreated,
-        });
-        if (error) console.warn('[evidence] research_session insert:', error.message);
-      }
-    } catch (err) {
-      console.warn('[evidence] research_session update/insert:', err.message);
-    }
 
   } catch (err) {
     results.errors.push(`Evidence extraction failed: ${err.message}`);
@@ -283,7 +273,7 @@ export async function extractEvidenceFromCrawl(projectId, analysis, pages) {
  * @param {Array} searchResults - NormalizedResult[] from webSearch.js
  * @returns {Promise<{ sourcesCreated: number, evidenceCreated: number, errors: string[] }>}
  */
-export async function extractEvidenceFromSearch(projectId, purpose, searchResults) {
+export async function extractEvidenceFromSearch(projectId, purpose, searchResults, sessionId) {
   const results = { sourcesCreated: 0, evidenceCreated: 0, errors: [] };
 
   if (!Array.isArray(searchResults) || searchResults.length === 0) return results;
@@ -310,7 +300,7 @@ export async function extractEvidenceFromSearch(projectId, purpose, searchResult
       title,
       snippet: snippet.slice(0, 500),
       publicationDate,
-      hierarchyScore,
+      hierarchyScore, sessionId,
     });
     if (!source) {
       results.errors.push(`Failed to create source for ${url.slice(0, 60)}`);
@@ -327,6 +317,7 @@ export async function extractEvidenceFromSearch(projectId, purpose, searchResult
     try {
       const { error } = await supabase.from('evidence').insert({
         project_id: projectId,
+        research_session_id: sessionId,
         source_id: source.id,
         claim_type: claimType,
         page_title: title || null,
@@ -370,6 +361,7 @@ async function createOrGetSource(projectId, url, sourceType = 'official', meta =
       .from('sources')
       .select('id, url, source_type, domain')
       .eq('project_id', projectId)
+      .eq('research_session_id', meta.sessionId)
       .eq('url', normalizedUrl)
       .maybeSingle();
 
@@ -384,6 +376,7 @@ async function createOrGetSource(projectId, url, sourceType = 'official', meta =
       .from('sources')
       .insert({
         project_id: projectId,
+        research_session_id: meta.sessionId,
         url: normalizedUrl,
         title: meta.title ? String(meta.title).slice(0, 500) : null,
         snippet: meta.snippet ? String(meta.snippet).slice(0, 1000) : null,
@@ -400,7 +393,7 @@ async function createOrGetSource(projectId, url, sourceType = 'official', meta =
     if (error) {
       // Unique constraint violation = race condition, re-fetch
       if (error.code === '23505') {
-        const { data: race } = await supabase.from('sources').select('id, url, source_type, domain').eq('project_id', projectId).eq('url', normalizedUrl).maybeSingle();
+        const { data: race } = await supabase.from('sources').select('id, url, source_type, domain').eq('project_id', projectId).eq('research_session_id', meta.sessionId).eq('url', normalizedUrl).maybeSingle();
         return race || null;
       }
       console.error('[createOrGetSource]', error.message);

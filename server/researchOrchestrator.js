@@ -32,36 +32,11 @@ import { extractEvidenceFromCrawl, extractEvidenceFromSearch } from './evidenceE
 import { generateClaimsFromEvidence, removeDuplicateClaims, detectClaimConflicts } from './claimEngine.js';
 
 /**
- * Update research session status (creates session if not yet present).
- * Failure-tolerant — never throws.
+ * Persist progress for this run. Database errors must reach the caller.
  */
-async function updateSession(projectId, fields) {
-  try {
-    const { data: existing } = await supabase
-      .from('research_sessions')
-      .select('id')
-      .eq('project_id', projectId)
-      .maybeSingle();
-
-    if (existing) {
-      const { error } = await supabase
-        .from('research_sessions')
-        .update({ ...fields })
-        .eq('project_id', projectId);
-      if (error) console.warn('[orchestrator] session update failed:', error.message);
-    } else {
-      const { error } = await supabase
-        .from('research_sessions')
-        .insert({
-          project_id: projectId,
-          research_type: 'initial',
-          ...fields,
-        });
-      if (error) console.warn('[orchestrator] session insert failed:', error.message);
-    }
-  } catch (err) {
-    console.warn('[orchestrator] session update error:', err.message);
-  }
+async function updateSession(sessionId, fields) {
+  const { error } = await supabase.from('research_sessions').update(fields).eq('id', sessionId);
+  if (error) throw error;
 }
 
 /**
@@ -70,8 +45,8 @@ async function updateSession(projectId, fields) {
  */
 async function updateProjectStatus(projectId, status) {
   try {
-    const { error } = await supabase.from('projects').update({ status }).eq('id', projectId);
-    if (error) console.warn('[orchestrator] project status update failed:', status, error.message);
+    const { error } = await supabase.from('projects').update({ status, updated_at: new Date().toISOString() }).eq('id', projectId);
+    if (error) throw error;
   } catch (err) {
     console.warn('[orchestrator] project status error:', err.message);
   }
@@ -97,6 +72,12 @@ async function updateProjectStatus(projectId, status) {
  */
 export async function orchestrateResearch(projectId, project, crawlResult, purpose = 'general') {
   const startTime = Date.now();
+  // A run owns exactly one session; historical sessions are never overwritten.
+  // Missing research tables must fail visibly before we report successful work.
+  const { data: session, error: sessionError } = await supabase.from('research_sessions')
+    .insert({ project_id: projectId, research_type: 'initial', status: 'queued' }).select('id').single();
+  if (sessionError) throw sessionError;
+  const sessionId = session.id;
   let sessionStatus = 'partial';
   let subjectInfo = null;
   let crawlEvidence = { sourcesCreated: 0, evidenceCreated: 0, errors: [] };
@@ -109,13 +90,13 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
   // ── Step 1: Identify subject ─────────────────────────────────────────────
   try {
     await updateProjectStatus(projectId, 'identifying');
-    await updateSession(projectId, { status: 'identifying' });
+    await updateSession(sessionId, { status: 'identifying' });
 
     const analysis = crawlResult.analysis || {};
     subjectInfo = identifySubject(analysis, project.name || '');
 
     console.log(`[orchestrator] Subject identified: "${subjectInfo.name}" (${subjectInfo.orgType}) @ ${subjectInfo.domain}`);
-    await updateSession(projectId, {
+    await updateSession(sessionId, {
       subject_name: subjectInfo.name,
       subject_type: subjectInfo.orgType,
       research_mode: researchMode,
@@ -129,15 +110,17 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
   // ── Step 2: Extract crawl evidence ──────────────────────────────────────
   try {
     await updateProjectStatus(projectId, 'crawling');
-    await updateSession(projectId, { status: 'crawling', crawl_date: new Date().toISOString() });
+    await updateSession(sessionId, { status: 'crawling', crawl_date: new Date().toISOString() });
 
     const evidenceAnalysis = { ...(crawlResult.analysis || {}), url: project.url };
     crawlEvidence = await extractEvidenceFromCrawl(
       projectId,
       evidenceAnalysis,
-      crawlResult.analysis?.pages || []
+      crawlResult.analysis?.pages || [],
+      sessionId
     );
     console.log(`[orchestrator] Crawl evidence: ${crawlEvidence.evidenceCreated} items, ${crawlEvidence.errors.length} errors`);
+    if (crawlEvidence.errors.length) console.warn('[orchestrator] Crawl evidence issues:', crawlEvidence.errors.map(error => String(error).slice(0, 250)));
   } catch (err) {
     console.error('[orchestrator] crawl evidence extraction failed:', err.message);
     crawlEvidence.errors.push(err.message);
@@ -146,7 +129,7 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
   // ── Step 3: Web research (OpenAI + open knowledge bases) ───────────────────────────
   try {
     await updateProjectStatus(projectId, 'researching');
-    await updateSession(projectId, { status: 'researching' });
+    await updateSession(sessionId, { status: 'researching' });
 
     const { results, queriesRun, errors: searchErrors } = await researchSubject(
       subjectInfo,
@@ -154,16 +137,17 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
       { maxQueries: config.maxSearchQueries, maxSources: config.maxResearchSources }
     );
 
-    await updateSession(projectId, {
+    await updateSession(sessionId, {
       search_date: new Date().toISOString(),
       search_queries_run: queriesRun,
     });
 
     // ── Step 4: Extract search evidence ────────────────────────────────
     await updateProjectStatus(projectId, 'extracting');
-    await updateSession(projectId, { status: 'extracting' });
+    await updateSession(sessionId, { status: 'extracting' });
 
-    searchEvidence = await extractEvidenceFromSearch(projectId, purpose, results);
+    searchEvidence = await extractEvidenceFromSearch(projectId, purpose, results, sessionId);
+    searchEvidence.errors.push(...searchErrors);
     console.log(`[orchestrator] Search evidence: ${searchEvidence.evidenceCreated} items from ${results.length} sources`);
 
     if (searchErrors.length > 0) {
@@ -177,11 +161,11 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
   // ── Step 5: Generate + validate claims ───────────────────────────────────
   try {
     await updateProjectStatus(projectId, 'validating');
-    await updateSession(projectId, { status: 'validating' });
+    await updateSession(sessionId, { status: 'validating' });
 
-    claims = await generateClaimsFromEvidence(projectId);
-    duplicateClaims = await removeDuplicateClaims(projectId);
-    conflicts = await detectClaimConflicts(projectId);
+    claims = await generateClaimsFromEvidence(projectId, sessionId);
+    duplicateClaims = await removeDuplicateClaims(projectId, sessionId);
+    conflicts = await detectClaimConflicts(projectId, sessionId);
 
     console.log(`[orchestrator] Claims: ${claims.claimsCreated} created, ${duplicateClaims.removed} deduped, ${conflicts.length} conflicts`);
   } catch (err) {
@@ -200,7 +184,7 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
   const totalEvidence = crawlEvidence.evidenceCreated + searchEvidence.evidenceCreated;
 
   // Determine final session status & effective mode
-  const effectiveMode = (researchMode === 'crawl_and_search' && searchEvidence.sourcesCreated > 0)
+  const effectiveMode = searchEvidence.sourcesCreated > 0
     ? 'crawl_and_search'
     : 'crawl_only';
 
@@ -212,8 +196,7 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
     sessionStatus = 'failed';
   }
 
-  try {
-    await updateSession(projectId, {
+  await updateSession(sessionId, {
       status: sessionStatus,
       research_mode: effectiveMode,
       sources_count: totalSources,
@@ -223,21 +206,19 @@ export async function orchestrateResearch(projectId, project, crawlResult, purpo
       errors_count: totalErrors,
       completion_time: new Date().toISOString(),
     });
-  } catch (err) {
-    console.warn('[orchestrator] final session update failed:', err.message);
-  }
 
   const durationMs = Date.now() - startTime;
-  console.log(`[orchestrator] Research complete in ${durationMs}ms | mode=${researchMode} | status=${sessionStatus} | sources=${totalSources} | evidence=${totalEvidence} | claims=${claims.claimsCreated}`);
+  console.log(`[orchestrator] Research complete in ${durationMs}ms | mode=${effectiveMode} | status=${sessionStatus} | sources=${totalSources} | evidence=${totalEvidence} | claims=${claims.claimsCreated}`);
 
   return {
+    sessionId,
     subjectInfo,
     crawlEvidence,
     searchEvidence,
     claims,
     duplicateClaims,
     conflicts,
-    researchMode,
+    researchMode: effectiveMode,
     sessionStatus,
     webResearchStatus: getWebResearchStatus(),
     summary: {

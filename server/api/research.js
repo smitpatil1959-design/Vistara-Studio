@@ -35,8 +35,6 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: 'Only the project owner can access research data.' });
     }
 
-    // ── Session status (default resource) ──────────────────────────────────
-    if (!resource) {
       const { data: session, error } = await supabase
         .from('research_sessions')
         .select('*')
@@ -45,17 +43,10 @@ export default async function handler(req, res) {
         .limit(1)
         .maybeSingle();
 
-      if (error) {
-        if (error.code === 'PGRST205' || error.code === '42P01') {
-          return res.status(503).json({ error: 'Research tables not initialized. Run supabase/schema.sql.', code: 'DATABASE_UNINITIALIZED' });
-        }
-        return res.status(500).json({ error: 'Failed to load research session' });
-      }
+    if (error) throw error;
+    if (!session) return res.status(404).json({ error: 'No research session found.', code: 'NO_SESSION' });
 
-      if (!session) {
-        return res.status(404).json({ error: 'No research session found for this project.', code: 'NO_SESSION' });
-      }
-
+    if (!resource) {
       return res.status(200).json({
         id: session.id,
         status: session.status,
@@ -82,6 +73,7 @@ export default async function handler(req, res) {
         .from('sources')
         .select('id, url, title, snippet, source_type, domain, hierarchy_score, publication_date, fetched_at, status')
         .eq('project_id', projectId)
+        .eq('research_session_id', session.id)
         .eq('status', 'success')
         .order('hierarchy_score', { ascending: false })
         .limit(50);
@@ -110,6 +102,7 @@ export default async function handler(req, res) {
         .from('evidence')
         .select('id, source_id, claim_type, page_title, section, extracted_text, confidence, publication_date, sources(url, source_type)')
         .eq('project_id', projectId)
+        .eq('research_session_id', session.id)
         .order('confidence', { ascending: false })
         .limit(100);
 
@@ -137,6 +130,7 @@ export default async function handler(req, res) {
         .from('claims')
         .select('id, claim, claim_type, status, confidence, source_urls, basis')
         .eq('project_id', projectId)
+        .eq('research_session_id', session.id)
         .order('confidence', { ascending: false })
         .limit(150);
 

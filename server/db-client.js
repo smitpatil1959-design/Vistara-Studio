@@ -8,7 +8,7 @@ let _client = null;
 
 function getClient() {
   if (_client) return _client;
-    const url = (process.env.SUPABASE_URL || '').trim().replace(/^["']|["']$/g, '');
+    const url = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim().replace(/^["']|["']$/g, '');
 
     const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim().replace(/^["']|["']$/g, '');
 
@@ -20,10 +20,14 @@ function getClient() {
     url,
     key,
     {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
       global: {
         fetch: async (targetUrl, options) => {
           try {
-            const res = await fetch(targetUrl, options);
+            const signal = options?.signal
+              ? AbortSignal.any([options.signal, AbortSignal.timeout(20000)])
+              : AbortSignal.timeout(20000);
+            const res = await fetch(targetUrl, { ...options, signal });
             if (!res.ok && res.status >= 500) triggerRestore();
             return res;
           } catch (fetchErr) {
@@ -44,7 +48,9 @@ const supabase = new Proxy(
   {},
   {
     get(_target, prop) {
-      return getClient()[prop];
+      const client = getClient();
+      const value = client[prop];
+      return typeof value === 'function' ? value.bind(client) : value;
     },
   }
 );

@@ -1,0 +1,70 @@
+// Read-only checks for the disposable browser workflow project. Never prints keys.
+import assert from 'node:assert/strict';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createClient } from '@supabase/supabase-js';
+import JSZip from 'jszip';
+for (const file of ['.env.local', '.env']) { try { process.loadEnvFile(file); } catch { /* optional */ } }
+const projectId = process.argv[2];
+assert.match(projectId || '', /^[0-9a-f-]{36}$/i, 'Pass the browser test project ID');
+const base = process.env.SMOKE_BASE_URL || 'http://localhost:4510';
+const storageOrigin = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const db = createClient(storageOrigin, process.env.VITE_SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+const { data: login, error } = await db.auth.signInWithPassword(JSON.parse(readFileSync('.test-build/backend/browser-account.json', 'utf8')));
+assert.ifError(error);
+const token = login.session.access_token;
+const owner = { Authorization: `Bearer ${token}` };
+const checks = [];
+async function check(path, headers, expected, name) {
+  const response = await fetch(new URL(path, base), { headers, signal: AbortSignal.timeout(60000) });
+  assert.equal(response.status, expected, name);
+  checks.push(name); return response;
+}
+const { data: project } = await db.from('projects').select('status,understanding,analysis').eq('id', projectId).single();
+assert.equal(project.status, 'generated');
+assert.match(project.understanding.meta.engine, /^nvidia/);
+assert.equal(project.understanding.meta.note, null);
+checks.push('Real NVIDIA understanding validated without fallback');
+const sessionId = project.analysis.research.sessionId;
+const { data: claims } = await db.from('claims').select('id,claim,research_session_id').eq('project_id', projectId).eq('research_session_id', sessionId);
+assert.ok(claims.length > 5);
+assert.equal(claims.some(claim => /this page displays a fallback|copyright|interactive scripts did not run/i.test(claim.claim)), false);
+const spec = await (await check(`/api/spec?projectId=${projectId}`, owner, 200, 'Owner can load the saved deck')).json();
+const document = spec.spec;
+assert.ok(document.slides.length >= 3);
+const title = document.slides[0].elements.find(element => element.content?.role === 'title')?.content.text;
+assert.equal(title, 'Python — browser save verified');
+checks.push('Browser edit survived reload and database round trip');
+const { data: slides } = await db.from('slides').select('claim_ids').eq('project_id', projectId);
+const currentIds = new Set(claims.map(claim => claim.id));
+assert.ok(slides.some(slide => slide.claim_ids?.length));
+assert.equal(slides.flatMap(slide => slide.claim_ids || []).every(id => currentIds.has(id)), true);
+checks.push('Every generated slide citation belongs to the current research run');
+for (const endpoint of ['spec', 'presentation', 'export-pptx']) {
+  await check(`/api/${endpoint}?projectId=${projectId}`, {}, 404, `Anonymous private ${endpoint} is denied`);
+}
+const { data: assets } = await db.from('assets').select('url,path').eq('project_id', projectId).limit(1);
+const image = assets?.[0]?.url || project.analysis.screenshot;
+assert.ok(image, 'A real screenshot was stored');
+const imageUrl = new URL(image, base);
+await check(imageUrl, owner, 200, 'Owner can load a protected image');
+await check(imageUrl, {}, 404, 'Anonymous private image is denied');
+await check(imageUrl, { Cookie: `vistara_session=${token}` }, 200, 'Owner image works through the browser session cookie');
+const bucket = imageUrl.searchParams.get('bucket') || 'assets';
+const path = imageUrl.searchParams.get('path');
+assert.ok(path);
+const oldPublic = await fetch(`${storageOrigin}/storage/v1/object/public/${bucket}/${path}`, { signal: AbortSignal.timeout(20000) });
+assert.notEqual(oldPublic.status, 200); checks.push('Direct legacy public storage URL is denied');
+const report = await (await check(`/api/export-report?projectId=${projectId}&format=pptx`, owner, 200, 'PowerPoint readiness request succeeds')).json();
+assert.equal(report.ready, true);
+const response = await check(`/api/export-pptx?projectId=${projectId}`, owner, 200, 'Real PowerPoint export succeeds');
+const buffer = Buffer.from(await response.arrayBuffer());
+const zip = await JSZip.loadAsync(buffer);
+const slideFiles = Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name));
+assert.equal(slideFiles.length, document.slides.length);
+assert.match(await zip.file('ppt/slides/slide1.xml').async('string'), /browser save verified/);
+assert.ok(Object.keys(zip.files).some(name => name.startsWith('ppt/media/')));
+mkdirSync('.test-build/backend', { recursive: true });
+writeFileSync('.test-build/backend/python-workflow.pptx', buffer);
+const result = { projectId, sessionId, provider: project.understanding.meta.engine, slides: document.slides.length, claims: claims.length, checks, pptxBytes: buffer.length, verifiedAt: new Date().toISOString() };
+writeFileSync('.test-build/backend/workflow-verification.json', JSON.stringify(result, null, 2));
+console.log(JSON.stringify(result, null, 2));

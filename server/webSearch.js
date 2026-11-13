@@ -127,7 +127,7 @@ export function identifySubject(crawlAnalysis, fallbackName = '') {
   try { domain = new URL(url).hostname.toLowerCase().replace(/^www\./, ''); } catch { domain = host.replace(/^www\./, ''); }
 
   // Extract company name from title (remove common suffixes)
-  const name = extractCompanyName(title, fallbackName, domain);
+  const name = extractCompanyName(title, fallbackName, domain, crawlAnalysis?.siteName);
 
   // Classify org type from signals
   const orgType = classifyOrgType({ title, description, url, headings, paragraphs, tech, domain });
@@ -138,7 +138,7 @@ export function identifySubject(crawlAnalysis, fallbackName = '') {
 /**
  * Extract company/org name from page title
  */
-function extractCompanyName(title, fallback, domain) {
+function extractCompanyName(title, fallback, domain, siteName) {
   const cleanDomain = (domain || '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0];
   const domainBase = cleanDomain.split('.')[0] || '';
   const brandName = domainBase ? domainBase.charAt(0).toUpperCase() + domainBase.slice(1) : '';
@@ -152,9 +152,15 @@ function extractCompanyName(title, fallback, domain) {
 
   // Strip common suffixes: "| Home", "- Official", "™", "®"
   let cleaned = title
+    .replace(/^welcome to\s+/i, '')
     .replace(/\s*[|\-–—:]\s*.{0,80}$/, '')
     .replace(/™|®|©/g, '')
     .trim();
+  if (cleaned.toLowerCase() === cleanDomain) cleaned = brandName;
+  if (/^(?:about(?: us| the company)?|company info(?:rmation)?|our story|home(?:page)?|welcome|official site|corporate|contact(?: us)?|newsroom)$/i.test(cleaned)) {
+    const suffix = title.split(/\s+[|\-–—:]\s+/).at(-1)?.trim();
+    return [siteName, suffix, brandName, fallback].find(candidate => candidate && candidate.toLowerCase() !== cleaned.toLowerCase()) || cleaned;
+  }
 
   if (!cleaned || cleaned.toLowerCase().startsWith('www') || /access.*denied|forbidden|error/i.test(cleaned)) {
     return brandName || fallback || cleanDomain;
@@ -408,6 +414,7 @@ async function performWebSearch(query, category, targetDomain) {
       body: JSON.stringify({
         model: config.openaiModel || 'gpt-4o-mini',
         tools: [{ type: 'web_search' }],
+        include: ['web_search_call.action.sources'],
         input: [
           {
             role: 'user',
@@ -475,9 +482,18 @@ Rules:
     try { raw = JSON.parse(jsonMatch[0]); } catch { return []; }
     if (!Array.isArray(raw)) return [];
 
+    const citedUrls = new Set();
+    for (const item of data.output || []) {
+      for (const source of item.action?.sources || []) if (source.url) citedUrls.add(source.url.replace(/\/$/, ''));
+      for (const block of item.content || []) for (const annotation of block.annotations || []) {
+        if (annotation.type === 'url_citation' && annotation.url) citedUrls.add(annotation.url.replace(/\/$/, ''));
+      }
+    }
+    // A model-written URL is not evidence unless the search tool actually
+    // returned it. See the official Responses web-search sources contract.
     // Normalize and validate every result — never pass raw objects downstream
     return raw
-      .filter(r => r && typeof r === 'object' && typeof r.url === 'string' && r.url.startsWith('http'))
+      .filter(r => r && typeof r === 'object' && typeof r.url === 'string' && /^https?:\/\//i.test(r.url) && citedUrls.has(r.url.replace(/\/$/, '')))
       .map(r => {
         const url = String(r.url || '').trim();
         const { sourceType, hierarchyScore } = classifySourceFromUrl(url, targetDomain);
@@ -539,20 +555,8 @@ export async function fetchPublicKnowledge(subjectName, targetDomain) {
     ? targetDomain.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/.*$/, '').trim()
     : '';
 
-  // 1. Official Web Domain presence
-  if (cleanDomain) {
-    results.push({
-      title: `${brand} — Official Web Presence`,
-      url: `https://${cleanDomain}`,
-      snippet: `Official website and core digital platform for ${brand} (${cleanDomain}).`,
-      sourceType: 'official',
-      hierarchyScore: 1.0,
-      publicationDate: null,
-      confidence: 1.0,
-      category: 'product',
-    });
-  }
-
+  // Official evidence is extracted from the actual crawl. Do not invent a
+  // generic description merely because a submitted domain exists.
   // 2. Wikipedia Summary & Intro APIs
   let wikiPageUrl = null;
   try {
@@ -581,7 +585,9 @@ export async function fetchPublicKnowledge(subjectName, targetDomain) {
 
   // 3. Wikipedia Intro Section (captures competitors and business verticals)
   try {
-    const wikiIntroUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles=${encodeURIComponent(brand)}&format=json`;
+    if (!wikiPageUrl) throw new Error('No unambiguous Wikipedia article found');
+    const wikiTitle = decodeURIComponent(new URL(wikiPageUrl).pathname.split('/wiki/')[1] || brand);
+    const wikiIntroUrl = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles=${encodeURIComponent(wikiTitle)}&format=json`;
     const res = await fetch(wikiIntroUrl, {
       headers: { 'User-Agent': 'VistaraStudioBot/1.0 (https://vistara.studio)' },
       signal: AbortSignal.timeout(5000),
@@ -597,7 +603,7 @@ export async function fetchPublicKnowledge(subjectName, targetDomain) {
             if (/compete|rival|competitor|market share|vs\b/i.test(para)) {
               results.push({
                 title: `${brand} — Market Position & Competition Analysis`,
-                url: `${wikiPageUrl || 'https://en.wikipedia.org/wiki/' + encodeURIComponent(brand)}#Competition`,
+                url: wikiPageUrl,
                 snippet: para.slice(0, 500),
                 sourceType: 'industry',
                 hierarchyScore: 0.85,
@@ -622,15 +628,12 @@ export async function fetchPublicKnowledge(subjectName, targetDomain) {
     });
     if (res.ok) {
       const data = await res.json();
-      const relatedTopics = Array.isArray(data.RelatedTopics)
-        ? data.RelatedTopics.map(t => t.Text).filter(Boolean).slice(0, 3).join('; ')
-        : '';
-      const text = data.Abstract || data.RelatedTopics?.[0]?.Text;
-      if (text && text.length > 25) {
-        const snippetText = relatedTopics ? `${text} (Related sectors: ${relatedTopics})` : text;
+      const text = data.Abstract;
+      if (text && text.length > 25 && /^https?:\/\//.test(data.AbstractURL || '')) {
+        const snippetText = text;
         results.push({
           title: `${data.Heading || brand} — Industry & Category Profile`,
-          url: `https://duckduckgo.com/?q=${encodeURIComponent(brand)}+company`,
+          url: data.AbstractURL,
           snippet: snippetText.slice(0, 500),
           sourceType: 'industry',
           hierarchyScore: 0.8,

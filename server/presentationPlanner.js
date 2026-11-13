@@ -22,6 +22,27 @@ import { writePresentationContent } from './presentation/contentRewriter.js';
 import { optimizeDeckLayouts } from './presentation/layoutSelector.js';
 import { critiqueAndRepairDeck } from './presentation/presentationCritic.js';
 import { toCanonicalSection } from './spec/index.js';
+import { buildEvidenceStory } from './presentation/evidenceStory.js';
+
+/** A product URL should not inherit unrelated sections from its parent website. */
+export function claimsForPresentation(claims, projectUrl) {
+  try {
+    const target = new URL(projectUrl);
+    const path = target.pathname.toLowerCase().replace(/\/$/, '');
+    const segment = path.split('/').filter(Boolean).at(-1);
+    if (!segment || /^(about|about-us|company|company-info|corporate|overview|home|index|newsroom|en|en-us)$/.test(segment)) return claims;
+    const host = target.hostname.replace(/^www\./i, '');
+    const root = segment.replace(/\.html?$/, '');
+    const matched = claims.filter(claim => (claim.source_urls || []).some(source => {
+      try {
+        const url = new URL(source), p = url.pathname.toLowerCase().replace(/\/$/, '');
+        if (url.hostname.replace(/^www\./i, '') !== host) return false;
+        return p === path || p.startsWith(path + '/') || p.split('/').some(part => part === root || part.startsWith(root + '-') || part.endsWith('-' + root));
+      } catch { return false; }
+    }));
+    return matched.length >= 6 ? matched : claims;
+  } catch { return claims; }
+}
 
 /**
  * Plan the presentation structure.
@@ -39,6 +60,7 @@ export async function planPresentation(projectId, subjectInfo, verifiedClaims, p
     return [];
   }
 
+  verifiedClaims = claimsForPresentation(verifiedClaims, project?.url);
   const canonicalPurpose = canonicalizePurpose(purpose);
 
   // 1. Build profile — pass purpose explicitly so subjectProfile can store it
@@ -69,8 +91,11 @@ export async function planPresentation(projectId, subjectInfo, verifiedClaims, p
  * @returns {Promise<Array>} Slide objects ready for DB insert and 16:9 canvas rendering
  */
 export async function buildSlidesFromClaims(selection, claims, project = {}, subjectInfo = {}, purpose = 'general') {
+  claims = claimsForPresentation(claims, project?.url);
   const canonicalPurpose = canonicalizePurpose(purpose);
   const profile = buildSubjectProfile(subjectInfo, claims, project?.analysis || {}, canonicalPurpose);
+  const expanded = await buildEvidenceStory(claims, project, profile, canonicalPurpose);
+  if (expanded.length >= Math.max(4, selection?.length || 0)) return expanded;
 
   // Convert legacy selection specs if needed — always use the explicit canonical purpose
   let storyPlan = selection;
@@ -80,7 +105,7 @@ export async function buildSlidesFromClaims(selection, claims, project = {}, sub
   }
 
   // 1. Write presentation content
-  let slides = await writePresentationContent(storyPlan, profile, project);
+  let slides = await writePresentationContent(storyPlan, profile, { ...project, intake: { ...project.intake, purpose: canonicalPurpose } });
 
   // 2. Optimize layouts for visual rhythm
   slides = optimizeDeckLayouts(slides, profile);

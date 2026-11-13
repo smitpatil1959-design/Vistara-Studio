@@ -38,7 +38,7 @@ export function buildSubjectProfile(target, claims = [], extra = null, purpose =
   const analysis = project?.analysis || (extra?.title || extra?.description ? extra : {});
   const session = extra?.subject_name ? extra : null;
 
-  const url = subjectInfo?.domain ? `https://${subjectInfo.domain}` : (project?.url || analysis?.url || '');
+  const url = project?.url || subjectInfo?.url || analysis?.url || (subjectInfo?.domain ? `https://${subjectInfo.domain}` : '');
   const host = subjectInfo?.domain || analysis?.host || extractHost(url);
 
   // 1. Resolve clean subject name
@@ -56,7 +56,7 @@ export function buildSubjectProfile(target, claims = [], extra = null, purpose =
   const archetype = inferArchetype(fullCorpus, explicitType);
 
   // 4. Clean positioning statement grounded strictly in evidence
-  const cleanPositioning = buildCleanPositioning(name, archetype, {}, analysis, claims);
+  const cleanPositioning = buildCleanPositioning(name, analysis, claims, url);
 
   // 5. Detect supported topics based strictly on factual evidence
   const supportedTopics = detectSupportedTopics(claims, fullCorpus);
@@ -174,32 +174,16 @@ function inferArchetype(corpus, explicitType) {
  * Builds clean positioning strictly from verified evidence.
  * Prefers actual crawled/verified descriptions over synthetic fallbacks.
  */
-function buildCleanPositioning(name, archetype, understanding, analysis, claims) {
-  // 1. Check understanding tagline or purpose
-  const uTagline = understanding?.identity?.tagline?.value;
-  if (uTagline && uTagline.length > 15 && uTagline.length < 140 && !uTagline.includes('|')) {
-    return uTagline;
-  }
-
-  const uPurpose = understanding?.purpose?.primary?.value;
-  if (uPurpose && uPurpose.length > 20 && uPurpose.length < 150 && !uPurpose.includes('|')) {
-    return uPurpose;
-  }
-
-  // 2. Check for an authoritative company_description claim from evidence
-  const descClaim = (claims || []).find(
-    (c) => c.claim_type === 'company_description' &&
-           typeof c.claim === 'string' &&
-           c.claim.length >= 25 &&
-           c.claim.length <= 160 &&
-           !c.claim.includes('|') &&
-           isHighQualityContent(c.claim)
-  );
-  if (descClaim) {
-    const text = cleanExtractedText(descClaim.claim);
-    const firstSentence = text.split(/[.!?]/)[0].trim();
-    if (firstSentence.length >= 25 && firstSentence.length <= 150) {
-      return `${firstSentence}.`;
+function buildCleanPositioning(name, analysis, claims, url) {
+  const normalize = value => String(value || '').toLowerCase().replace(/^https?:\/\/(?:www\.)?/, '').replace(/\/$/, '');
+  const subject = name.toLowerCase();
+  for (const claim of claims) {
+    if (!(claim.source_urls || []).some(source => normalize(source) === normalize(url))) continue;
+    if (!['company_description', 'mission', 'other'].includes(claim.claim_type)) continue;
+    const text = cleanExtractedText(claim.claim).replace(/^about(?: us)?\s+/i, '');
+    const sentence = text.match(/^.{20,210}?[.!?](?:\s|$)/)?.[0].trim() || text;
+    if (sentence.length <= 195 && sentence.toLowerCase().includes(subject) && isHighQualityContent(sentence) && !/^(explore|shop|buy|find|save|learn|lease|trade|sign up|reserve|order|download|get)\b/i.test(sentence)) {
+      return sentence;
     }
   }
 
@@ -214,7 +198,7 @@ function buildCleanPositioning(name, archetype, understanding, analysis, claims)
 
   // 4. Neutral generic fallback — avoids domain-specific assumptions
   //    (the archetype is used only for narrative sequencing, not for inventing copy)
-  return `${name} provides products, services, and capabilities for its audience.`;
+  return '';
 }
 
 function deriveCategory(archetype) {
@@ -270,7 +254,7 @@ function extractGroundMetrics(claims) {
   for (const c of claims) {
     const txt = typeof c.claim === 'string' ? c.claim : '';
     // Match numbers like "50M+", "$10B", "10,000+", "99.99%", "150+ countries"
-    const match = txt.match(/([\$₹€£]?\d+[\d,]*(?:\.\d+)?[KMBTkm]?\+?)\s+([a-zA-Z%]+(?:\s+[a-zA-Z]+)?)/);
+    const match = txt.match(/\b(\d[\d,]*(?:\.\d+)?[KMBT]?\+?)\s+(users|customers|attendees|countries|cities|members|downloads|employees|projects|organizations|groups|languages)\b/i);
     if (match && stats.length < 6) {
       const val = match[1].trim();
       const rawLabel = match[2].trim();

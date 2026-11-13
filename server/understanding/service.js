@@ -221,6 +221,7 @@ export async function understandWebsite(scan) {
         model = reply.model;
         candidate = parseJsonLenient(reply.text);
         const clean = sanitizeUnderstanding(candidate, `${reply.engine}:${reply.model}`, attempts, null);
+        clean.meta.model = reply.model;
         if (validate(clean)) {
           clean.meta.validated = true;
           clean.meta.factShare = computeFactShare(clean);
@@ -256,6 +257,8 @@ export async function understandWebsite(scan) {
   }
 
   // rules fallback — still schema-shaped, still validated before storing
+  engineTag = 'rules+schema';
+  model = null;
   const legacy = buildUnderstanding({ x: scan.x, subX: scan.subX, host: scan.host });
   const clean = sanitizeUnderstanding(wrapLegacy(legacy, scan), engineTag, attempts, note);
   if (!validate(clean)) {

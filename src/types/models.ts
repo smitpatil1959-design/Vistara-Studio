@@ -9,6 +9,9 @@ export interface SlideStat {
 }
 
 export interface Slide {
+  source_urls?: string[];
+  claim_ids?: string[];
+  evidence_ids?: string[];
   id: string;
   project_id: string;
   sort_order: number;
@@ -135,6 +138,7 @@ export interface StructuredCrawlError {
 }
 
 export interface Analysis {
+  brandKit?: import('../deck-spec').BrandKit;
   fetchedAt: string;
   url: string;
   finalUrl?: string;

@@ -118,21 +118,28 @@ function makeHostFirewall() {
   };
 }
 
-function pickInternal(links, host, max) {
+export function pickInternal(links, host, max) {
   const seen = new Set(['/']);
   const out = [];
   for (const l of links) {
     try {
       const u = new URL(l.url);
-      if (u.hostname.replace(/^www\./, '') !== host) continue;
+      if (u.hostname.replace(/^www\./, '') !== host.replace(/^www\./, '')) continue;
       const path = (u.pathname.replace(/\/+$/, '') || '/') + '';
       if (seen.has(path) || PATH_EXCLUDE.test(path)) continue;
       seen.add(path);
       out.push(u.toString());
-      if (out.length >= max) break;
     } catch { /* ignore malformed */ }
   }
-  return out;
+  // Prefer the site's explanatory pages over utility/community links that often
+  // appear first in navigation. Keep the crawl bounded after ranking candidates.
+  const relevance = (url) => {
+    const path = new URL(url).pathname;
+    const depth = path.split('/').filter(Boolean).length;
+    return (/^\/(about|products?|features?|solutions?|services?|overview|company)\/?$/i.test(path) ? 100 :
+      /^\/(about|products?|features?|solutions?|services?|docs?|documentation|downloads?|pricing)\b/i.test(path) ? 60 : 0) - depth;
+  };
+  return out.sort((a, b) => relevance(b) - relevance(a)).slice(0, max);
 }
 
 const trunc = (s, n) => (typeof s === 'string' ? (s.length > n ? s.slice(0, n) + '…' : s) : '');
@@ -429,9 +436,11 @@ export async function deepProbeOne(context, target, limits, budgetLeft) {
     probe.visualDna = await page.evaluate(() => {
       const rgbToHex = (rgb) => {
         if (!rgb) return null;
-        if (rgb.startsWith('#')) return rgb;
-        const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+        if (/^#[a-f\d]{3}$/i.test(rgb)) return '#' + Array.from(rgb.slice(1)).map(c => c + c).join('');
+        if (/^#[a-f\d]{6}$/i.test(rgb)) return rgb;
+        const m = rgb.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/i);
         if (!m) return null;
+        if (m[4] !== undefined && Number(m[4]) < 0.6) return null;
         return '#' + [m[1], m[2], m[3]].map((x) => parseInt(x, 10).toString(16).padStart(2, '0')).join('');
       };
 
@@ -467,6 +476,36 @@ export async function deepProbeOne(context, target, limits, budgetLeft) {
 
       // Extract colors from all visible heading and accent elements
       const colorSamples = [];
+      const brandSignals = [];
+      const seenSignals = new Set();
+      const sourceUrl = window.location.href;
+      const addSignal = (value, role, method, confidence) => {
+        const hex = rgbToHex(value);
+        const key = `${role}:${hex}`;
+        if (hex && /^#[0-9a-f]{6}$/i.test(hex) && brandSignals.length < 64 && !seenSignals.has(key)) {
+          seenSignals.add(key);
+          brandSignals.push({ value: hex, role, method, confidence, sourceUrl });
+        }
+      };
+      const rootStyle = getComputedStyle(document.documentElement);
+      for (const property of Array.from(rootStyle).filter(name => name.startsWith('--') && /brand|primary|accent|secondary/.test(name)).slice(0, 50)) {
+        if (/foreground|text|shadow|border|surface|background/.test(property)) continue;
+        addSignal(rootStyle.getPropertyValue(property).trim(), /primary|brand/.test(property) ? 'css-primary' : 'css-accent', `CSS variable ${property}`, 0.92);
+      }
+      for (const node of document.querySelectorAll('a[class*="logo"] svg, [class*="brand-logo"] svg, svg[aria-label*="logo" i], header a[href="/"] svg, header a[aria-label*="home" i] svg')) {
+        if (node.getBoundingClientRect().width < 12) continue;
+        for (const path of [node, ...node.querySelectorAll('path, rect, circle')]) addSignal(getComputedStyle(path).fill, 'logo', 'Visible home logo SVG fill', 0.90);
+      }
+      for (const node of document.querySelectorAll('main button, main a[class*="btn"], main a[class*="button"], main [role="button"], nav a, header a')) {
+        const box = node.getBoundingClientRect();
+        if (box.width < 12 || box.height < 12) continue;
+        const computed = getComputedStyle(node);
+        if (computed.visibility === 'hidden' || computed.display === 'none') continue;
+        if (!/cookie|consent|privacy|accept all|reject all/i.test(`${node.textContent} ${node.closest('[id*="cookie" i],[class*="cookie" i],[id*="onetrust" i]')?.id || ''}`)) addSignal(computed.backgroundColor, 'cta', `Visible control: ${(node.textContent || '').trim().slice(0, 55)}`, 0.84);
+        if (node.closest('nav, header')) addSignal(computed.color, 'navigation', 'Visible navigation text', 0.66);
+      }
+      addSignal(bodyBg, 'background', 'Computed body background', 0.95);
+      addSignal(bodyColor, 'body-text', 'Computed body text', 0.95);
       const sampleNodes = document.querySelectorAll('h1, h2, h3, a, button, [class*="accent"], [class*="brand"], [class*="primary"]');
       for (const node of sampleNodes) {
         const s = window.getComputedStyle(node);
@@ -489,6 +528,7 @@ export async function deepProbeOne(context, target, limits, budgetLeft) {
         cardBg,
         cardRadius,
         colorSamples: colorSamples.slice(0, 24),
+        brandSignals,
       };
     });
   } catch { /* visual dna optional */ }
