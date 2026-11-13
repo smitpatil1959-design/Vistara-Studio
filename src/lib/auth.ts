@@ -21,7 +21,9 @@ export function mapAuthError(error: unknown): AuthFailure {
   if (/invalid login credentials|invalid_grant|invalid email or password/.test(msg))
     return { code: 'invalid', message: 'The email or password is incorrect. If you have not created an account yet, create one first.' };
   if (/email not confirmed/.test(msg))
-    return { code: 'unconfirmed', message: 'Invalid email or password. Please try again.' };
+    return { code: 'unconfirmed', message: 'Please confirm your email address using the link in your inbox before signing in.' };
+  if (/provider.*(disabled|not enabled)|unsupported provider/.test(msg))
+    return { code: 'unknown', message: 'Google sign-in is not enabled yet. Please use email and password or contact the site administrator.' };
   if (/rate limit|too many requests|over_request_rate_limit/.test(msg))
     return { code: 'rate-limited', message: 'Too many attempts — give it a minute and try again.' };
   if (/not configured|missing supabase/.test(msg))

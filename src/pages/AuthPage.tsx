@@ -26,7 +26,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
   const nav = useNavigate();
   const [params] = useSearchParams();
-  const { signIn, signUp, isAuthenticated, loading } = useAuth();
+  const { signIn, signInWithGoogle, signUp, isAuthenticated, loading } = useAuth();
   const shouldReduceMotion = useReducedMotion();
   const isSignup = mode === 'signup';
 
@@ -42,7 +42,11 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
   const [busy, setBusy] = useState(false);
   const [signupSuccess, setSignupSuccess] = useState(false);
   const [failure, setFailure] = useState<AuthFailure | null>(null);
-  const [info, setInfo] = useState(() => (registered && !isSignup ? 'Account created successfully. Please sign in.' : ''));
+  const [info, setInfo] = useState(() => (
+    registered && !isSignup
+      ? 'Account created successfully. If email confirmation is enabled, check your inbox before signing in.'
+      : ''
+  ));
 
   // Subtle password strength evaluation for signup
   const passwordStrength = useMemo(() => {
@@ -111,6 +115,24 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
       }
     } else if (result.failure) {
       setFailure(result.failure);
+    }
+  };
+
+  const continueWithGoogle = async () => {
+    if (busy) return;
+    setFailure(null);
+    setInfo('');
+    setBusy(true);
+    const requestedNext = new URL(next, window.location.origin);
+    const redirectTo = (
+      requestedNext.origin === window.location.origin
+        ? requestedNext
+        : new URL('/dashboard', window.location.origin)
+    ).toString();
+    const result = await signInWithGoogle(redirectTo);
+    if (!result.ok) {
+      setBusy(false);
+      if (result.failure) setFailure(result.failure);
     }
   };
 
@@ -453,6 +475,33 @@ export default function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
                       </span>
                     </motion.button>
                   </form>
+
+                  <div className="flex items-center gap-3 my-5" aria-hidden="true">
+                    <span className="h-px flex-1 bg-line" />
+                    <span className="text-[10px] font-mono uppercase tracking-[0.18em] text-fog">or continue with</span>
+                    <span className="h-px flex-1 bg-line" />
+                  </div>
+
+                  <motion.button
+                    type="button"
+                    onClick={continueWithGoogle}
+                    disabled={busy}
+                    whileHover={busy ? {} : { y: -1, boxShadow: '0 10px 24px -16px rgba(23, 23, 15, 0.3)' }}
+                    whileTap={busy ? {} : { scale: 0.99 }}
+                    className="w-full rounded-xl border border-line bg-white/80 px-5 py-3.5 text-sm font-semibold text-ink shadow-sm transition-colors hover:border-sage/50 hover:bg-white flex items-center justify-center gap-3 disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {busy ? (
+                      <Loader2 size={17} className="animate-spin text-sage-deep" />
+                    ) : (
+                      <svg aria-hidden="true" viewBox="0 0 48 48" className="w-[18px] h-[18px]">
+                        <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5Z" />
+                        <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.76 7.18l7.73 6C44.42 38.05 46.98 31.95 46.98 24.55Z" />
+                        <path fill="#FBBC05" d="M10.53 28.59a14.4 14.4 0 0 1 0-9.18l-7.98-6.19a23.9 23.9 0 0 0 0 21.56l7.98-6.19Z" />
+                        <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.91-5.8l-7.73-6c-2.14 1.44-4.88 2.3-8.18 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48Z" />
+                      </svg>
+                    )}
+                    <span>{busy ? 'Connecting to Google…' : 'Continue with Google'}</span>
+                  </motion.button>
 
                   {/* Toggle between Signup and Login */}
                   <div className="flex items-center justify-between mt-6 text-[12.5px]">

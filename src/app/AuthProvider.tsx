@@ -99,7 +99,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           });
         }
         try {
-          const cleanEmail = email.trim();
+          const cleanEmail = email.trim().toLowerCase();
           const { data, error } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
           if (error) {
             return fail(error);
@@ -113,6 +113,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
       },
 
+      async signInWithGoogle(redirectTo) {
+        if (!supabase) {
+          return fail(null, {
+            code: 'unconfigured',
+            message: 'Supabase authentication is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in .env / Vercel.',
+          });
+        }
+        try {
+          const { error } = await supabase.auth.signInWithOAuth({
+            provider: 'google',
+            options: { redirectTo },
+          });
+          return error ? fail(error) : OK;
+        } catch (e) {
+          return fail(e);
+        }
+      },
+
       async signUp(email, password) {
         if (!supabase) {
           return fail(null, {
@@ -121,14 +139,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           });
         }
         try {
-          const cleanEmail = email.trim();
-          const res = await fetch('/api/auth/signup', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: cleanEmail, password }),
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) return fail(null, mapAuthError(data.error || data.message || 'Signup failed'));
+          const cleanEmail = email.trim().toLowerCase();
+          const { data, error } = await supabase.auth.signUp({ email: cleanEmail, password });
+          if (error) return fail(error);
+          if (data.user) {
+            void ensureUserProfile(data.user);
+          }
           return OK;
         } catch (e) {
           return fail(e);
@@ -136,6 +152,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
 
       async signOut() {
+        await fetch('/api/session', { method: 'DELETE', credentials: 'same-origin' }).catch(() => {});
         sessionStorage.setItem(MANUAL_SIGNOUT_FLAG, '1');
         setSession(null);
         if (supabase) {

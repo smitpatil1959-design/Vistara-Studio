@@ -39,7 +39,7 @@ supabase/       schema.sql — tables, constraints, indexes
 | Route | Purpose |
 | --- | --- |
 | `/` | Marketing surface with live interactive demos |
-| `/login` `/signup` | Email auth (Supabase); guest mode preserved |
+| `/login` `/signup` | Email + Google auth (Supabase); guest mode preserved |
 | `/dashboard` | Workspace — list / create / delete studies |
 | `/create` | Dedicated new-study intake |
 | `/settings` | Account, default theme for new studies, data notes |
@@ -67,7 +67,7 @@ Status lifecycle: `queued → crawling → processing → completed | failed`
 
 ## Environment
 
-Defined in `vercel.json` / `.env`: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` (server), `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY` (client auth).
+Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` for the server, plus `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` for browser auth. Use the same Supabase project for both. Google OAuth credentials are configured in Supabase Dashboard, not in `.env`. See [ENV_SETUP.md](./ENV_SETUP.md).
 
 ## Scripts
 

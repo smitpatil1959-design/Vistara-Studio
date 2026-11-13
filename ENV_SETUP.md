@@ -7,12 +7,26 @@ These environment variables **must** be configured on your Vercel/hosting platfo
 ### Supabase
 ```
 SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-public-anon-key
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
 Get these from:
 - **Supabase Dashboard** → Settings → API → Project URL
 - **Supabase Dashboard** → Settings → API → Service Role Secret (keep private!)
+- **Supabase Dashboard** → Settings → API → Publishable/anon key (browser-safe)
+
+Use the **same Supabase project URL** for `SUPABASE_URL` and `VITE_SUPABASE_URL`.
+
+### Google Sign-In
+
+Google sign-in does not require Google credentials in `.env`. Configure them in Supabase:
+
+1. In Google Cloud Console, create a Google OAuth client and add the callback URL shown by Supabase.
+2. In **Supabase Dashboard → Authentication → Providers → Google**, enable Google and enter the Google client ID and secret.
+3. In **Authentication → URL Configuration**, set the site URL and add your local and deployed app URLs to the redirect allow list (for example, `http://localhost:5173/**` and `https://your-domain.example/**`).
+4. Keep the Google client secret in Supabase; do not add it to `.env`, frontend variables, or source control.
 
 ## Optional Variables
 
@@ -56,6 +70,8 @@ Create a `.env.local` file in the project root:
 
 ```bash
 SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_ANON_KEY=your-public-anon-key
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
@@ -75,15 +91,12 @@ Error: Missing required environment variables: SUPABASE_URL, SUPABASE_SERVICE_RO
 
 Configuration is checked by `/server/config.js` and exported to all API routes.
 
-## No Client-Side Secrets
+## Client and Server Keys
 
-**Critical Security Rule**: API keys are **server-only**. They are never exposed to:
-- Browser JavaScript
-- `VITE_*` variables
-- `NEXT_PUBLIC_*` variables
-- Client bundles
+The Supabase anon/publishable key is intended for browser use and is exposed through `VITE_SUPABASE_ANON_KEY`. Protect data with Supabase RLS policies.
+Never expose `SUPABASE_SERVICE_ROLE_KEY`, Google OAuth client secrets, or AI provider keys to the browser or a `VITE_*`/`NEXT_PUBLIC_*` variable.
 
-All AI and research operations go through the Vistara backend API.
+AI and research operations go through the Vistara backend API.
 
 ## Troubleshooting
 
